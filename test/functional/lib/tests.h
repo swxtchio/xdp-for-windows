@@ -12,6 +12,12 @@ bool
 TestCleanup();
 
 VOID
+OpenApiTest();
+
+VOID
+LoadApiTest();
+
+VOID
 GenericBinding();
 
 VOID
@@ -27,9 +33,15 @@ VOID
 GenericRxBackfillAndTrailer();
 
 VOID
-GenericRxMatchUdp(
+GenericRxAllQueueRedirect(
+    _In_ ADDRESS_FAMILY Af
+    );
+
+VOID
+GenericRxMatch(
     _In_ ADDRESS_FAMILY Af,
-    _In_ XDP_MATCH_TYPE MatchType
+    _In_ XDP_MATCH_TYPE MatchType,
+    _In_ BOOLEAN IsUdp
     );
 
 VOID
@@ -47,31 +59,35 @@ VOID
 GenericRxMultiProgram();
 
 VOID
-GenericRxMultiProgramConflicts();
-
-VOID
 GenericRxUdpFragmentQuicShortHeader(
     _In_ ADDRESS_FAMILY Af
     );
 
 VOID
 GenericRxUdpFragmentQuicLongHeader(
-    _In_ ADDRESS_FAMILY Af
+    _In_ ADDRESS_FAMILY Af,
+    _In_ BOOLEAN IsUdp
     );
 
 VOID
-GenericRxUdpFragmentHeaderData(
-    _In_ ADDRESS_FAMILY Af
+GenericRxFragmentHeaderData(
+    _In_ ADDRESS_FAMILY Af,
+    _In_ BOOLEAN IsUdp
     );
 
 VOID
-GenericRxUdpTooManyFragments(
-    _In_ ADDRESS_FAMILY Af
+GenericRxTooManyFragments(
+    _In_ ADDRESS_FAMILY Af,
+    _In_ BOOLEAN IsUdp
     );
 
 VOID
-GenericRxUdpHeaderFragments(
-    _In_ ADDRESS_FAMILY Af
+GenericRxHeaderFragments(
+    _In_ ADDRESS_FAMILY Af,
+    _In_ XDP_RULE_ACTION ProgramAction,
+    _In_ BOOLEAN IsUdp,
+    _In_ BOOLEAN IsTxInspect = FALSE,
+    _In_ BOOLEAN IsLowResources = FALSE
     );
 
 VOID
@@ -108,7 +124,7 @@ GenericXskWaitAsync(
     _In_ BOOLEAN Rx,
     _In_ BOOLEAN Tx
     );
-    
+
 VOID
 GenericLwfDelayDetach(
     _In_ BOOLEAN Rx,

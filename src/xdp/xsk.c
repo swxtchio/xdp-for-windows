@@ -1660,8 +1660,7 @@ XskNotifyRxQueue(
 
 NTSTATUS
 XskValidateDatapathHandle(
-    _In_ HANDLE XskHandle,
-    _In_ XDP_RX_QUEUE *RxQueue
+    _In_ HANDLE XskHandle
     )
 {
     XSK *Xsk = (XSK *)XskHandle;
@@ -1674,11 +1673,30 @@ XskValidateDatapathHandle(
         return STATUS_NOT_SUPPORTED;
     }
 
-    if (Xsk->Rx.Xdp.Queue != RxQueue) {
-        return STATUS_INVALID_ADDRESS_COMPONENT;
+    return STATUS_SUCCESS;
+}
+
+BOOLEAN
+XskCanBypass(
+    _In_ HANDLE XskHandle,
+    _In_ XDP_RX_QUEUE *RxQueue
+    )
+{
+    XSK *Xsk = (XSK *)XskHandle;
+
+    //
+    // Allow XSKs that are terminally disconnected to bypass on any queue since
+    // the receive path becomes a NOP.
+    //
+    if (Xsk->State > XskActive && !Xsk->Rx.Xdp.Flags.DatapathAttached) {
+        return TRUE;
     }
 
-    return STATUS_SUCCESS;
+    if (Xsk->Rx.Xdp.Queue != RxQueue) {
+        return FALSE;
+    }
+
+    return TRUE;
 }
 
 static
@@ -4441,7 +4459,7 @@ XskReceive(
     UINT32 ReservedCount;
     UINT32 RxCount = 0;
 
-    if (!Xsk->Rx.Xdp.Flags.DatapathAttached) {
+    if (!Xsk->Rx.Xdp.Flags.DatapathAttached || Xsk->Rx.Xdp.Queue != Batch->RxQueue) {
         goto Exit;
     }
 

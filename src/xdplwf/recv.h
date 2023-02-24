@@ -15,6 +15,12 @@ typedef struct _XDP_LWF_GENERIC_RX_QUEUE {
     XDP_EXTENSION RxActionExtension;
     XDP_EXTENSION FragmentExtension;
     XDP_EXTENSION FrameInterfaceContextExtension;
+    NDIS_HANDLE TxCloneNblPool;
+    UINT32 TxCloneCacheLimit;
+    UINT32 TxCloneCacheCount;
+    SLIST_HEADER TxCloneNblSList;
+    NET_BUFFER_LIST *TxCloneNblList;
+    EX_RUNDOWN_REF NblRundown;
 
     //
     // For RX inspect, the EcLock provides mutual exclusion on the data path,
@@ -54,12 +60,14 @@ typedef struct _XDP_LWF_GENERIC_RX_QUEUE {
 
     XDP_LWF_GENERIC *Generic;
     struct {
+        BOOLEAN Paused : 1;
         BOOLEAN TxInspect : 1;
         BOOLEAN TxInspectInline: 1;
         BOOLEAN TxInspectWorker : 1;
         BOOLEAN TxInspectNeedFlush : 1;
     } Flags;
     UINT32 QueueId;
+    LIST_ENTRY Link;
     XDP_LIFETIME_ENTRY DeleteEntry;
     KEVENT *DeleteComplete;
 } XDP_LWF_GENERIC_RX_QUEUE;
@@ -93,19 +101,32 @@ XdpGenericReceive(
     _In_ NDIS_PORT_NUMBER PortNumber,
     _Out_ NBL_COUNTED_QUEUE *PassList,
     _Out_ NBL_QUEUE *DropList,
+    _Out_ NBL_COUNTED_QUEUE *TxList,
     _In_ UINT32 XdpInspectFlags
     );
 
-_IRQL_requires_max_(PASSIVE_LEVEL)
 VOID
-XdpGenericAttachIfRx(
-    _In_ XDP_LWF_GENERIC *Generic,
-    _In_ XDP_LWF_DATAPATH_BYPASS *Datapath
+XdpGenericRecvInjectComplete(
+    _In_ VOID *ClassificationResult,
+    _In_ NBL_COUNTED_QUEUE *Queue
     );
 
 _IRQL_requires_max_(PASSIVE_LEVEL)
+_Requires_exclusive_lock_held_(&Generic->Lock)
 VOID
-XdpGenericDetachIfRx(
+XdpGenericRxPause(
+    _In_ XDP_LWF_GENERIC *Generic
+    );
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Requires_exclusive_lock_held_(&Generic->Lock)
+VOID
+XdpGenericRxRestart(
     _In_ XDP_LWF_GENERIC *Generic,
-    _In_ XDP_LWF_DATAPATH_BYPASS *Datapath
+    _In_ UINT32 NewMtu
+    );
+
+VOID
+XdpGenericReceiveRegistryUpdate(
+    VOID
     );

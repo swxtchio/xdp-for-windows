@@ -9,7 +9,7 @@
 
 #include "precomp.h"
 #include <netiodef.h>
-#include <xdpudp.h>
+#include <xdptransport.h>
 #include "program.tmh"
 
 #pragma pack(push)
@@ -44,7 +44,11 @@ typedef struct _XDP_PROGRAM_FRAME_STORAGE {
         IPV4_HEADER Ip4Hdr;
         IPV6_HEADER Ip6Hdr;
     };
-    UDP_HDR UdpHdr;
+    union {
+        UDP_HDR UdpHdr;
+        TCP_HDR TcpHdr;
+    };
+    UINT8 TcpHdrOptions[40]; // Up to 40B options/paddings
     // Invariant header + 1 for SourceCidLength + 2x CIDS
     UINT8 QuicStorage[
         sizeof(QUIC_HEADER_INVARIANT) +
@@ -71,6 +75,8 @@ typedef struct _XDP_PROGRAM_FRAME_CACHE {
             UINT32 Ip6Valid : 1;
             UINT32 UdpCached : 1;
             UINT32 UdpValid : 1;
+            UINT32 TcpCached : 1;
+            UINT32 TcpValid : 1;
             UINT32 TransportPayloadCached : 1;
             UINT32 TransportPayloadValid : 1;
             UINT32 QuicCached : 1;
@@ -85,9 +91,13 @@ typedef struct _XDP_PROGRAM_FRAME_CACHE {
         IPV4_HEADER *Ip4Hdr;
         IPV6_HEADER *Ip6Hdr;
     };
-    UDP_HDR *UdpHdr;
+    union {
+        UDP_HDR *UdpHdr;
+        TCP_HDR *TcpHdr;
+    };
+    UINT8 *TcpHdrOptions;
     UINT8 QuicCidLength;
-    CONST UINT8* QuicCid; // Src CID for long header, Dest CID for short header
+    CONST UINT8 *QuicCid; // Src CID for long header, Dest CID for short header
     XDP_PROGRAM_PAYLOAD_CACHE TransportPayload;
 } XDP_PROGRAM_FRAME_CACHE;
 
@@ -198,6 +208,51 @@ XdpGetContiguousHeader(
 
 static
 VOID
+XdpCopyMemoryToFrame(
+    _In_ XDP_FRAME *Frame,
+    _In_ XDP_RING *FragmentRing,
+    _In_ XDP_EXTENSION *FragmentExtension,
+    _In_ UINT32 FragmentIndex,
+    _In_ XDP_EXTENSION *VirtualAddressExtension,
+    _In_ UINT32 FrameDataOffset,
+    _In_ VOID *Data,
+    _In_ UINT32 DataLength
+    )
+{
+    XDP_BUFFER *Buffer = &Frame->Buffer;
+    UINT32 FragmentCount;
+
+    //
+    // The first buffer is stored in the frame ring, so bias the fragment index
+    // so the initial increment yields the first buffer in the fragment ring.
+    //
+    FragmentIndex--;
+    FragmentCount = XdpGetFragmentExtension(Frame, FragmentExtension)->FragmentBufferCount;
+
+    while (DataLength > 0) {
+        if (FrameDataOffset >= Buffer->DataLength) {
+            FrameDataOffset -= Buffer->DataLength;
+            FragmentIndex = (FragmentIndex + 1) & FragmentRing->Mask;
+            Buffer = XdpRingGetElement(FragmentRing, FragmentIndex);
+            ASSERT(FragmentCount > 0);
+            FragmentCount--;
+        } else {
+            UINT32 CopyLength;
+            UCHAR *Va;
+
+            CopyLength = min(DataLength, Buffer->DataLength - FrameDataOffset);
+            Va = XdpGetVirtualAddressExtension(Buffer, VirtualAddressExtension)->VirtualAddress;
+            RtlCopyMemory(Va + Buffer->DataOffset, Data, CopyLength);
+
+            Data = RTL_PTR_ADD(Data, CopyLength);
+            DataLength -= CopyLength;
+            FrameDataOffset += CopyLength;
+        }
+    }
+}
+
+static
+VOID
 XdpParseFragmentedEthernet(
     _In_ XDP_FRAME *Frame,
     _Inout_ XDP_BUFFER **Buffer,
@@ -278,6 +333,50 @@ XdpParseFragmentedUdp(
 
 static
 VOID
+XdpParseFragmentedTcp(
+    _In_ XDP_FRAME *Frame,
+    _Inout_ XDP_BUFFER **Buffer,
+    _Inout_ UINT32 *BufferDataOffset,
+    _Inout_ UINT32 *FragmentIndex,
+    _Inout_ UINT32 *FragmentsRemaining,
+    _In_ XDP_RING *FragmentRing,
+    _In_ XDP_EXTENSION *VirtualAddressExtension,
+    _Out_ XDP_PROGRAM_FRAME_CACHE *Cache,
+    _Inout_ XDP_PROGRAM_FRAME_STORAGE *Storage
+    )
+{
+    UINT32 HeaderLengh;
+    BOOLEAN Valid =
+        XdpGetContiguousHeader(
+            Frame, Buffer, BufferDataOffset, FragmentIndex, FragmentsRemaining, FragmentRing,
+            VirtualAddressExtension, &Storage->TcpHdr, sizeof(Storage->TcpHdr), &Cache->TcpHdr);
+    if (!Valid) {
+        return;
+    }
+
+    HeaderLengh = TCP_HDR_LEN_TO_BYTES(Cache->TcpHdr->th_len);
+    if (HeaderLengh < sizeof(Storage->TcpHdr)) {
+        return;
+    }
+
+    if (HeaderLengh > sizeof(Storage->TcpHdr)) {
+        //
+        // Attempt to read TCP options.
+        //
+        Valid =
+            XdpGetContiguousHeader(
+                Frame, Buffer, BufferDataOffset, FragmentIndex, FragmentsRemaining, FragmentRing,
+                VirtualAddressExtension,
+                &Storage->TcpHdrOptions,
+                TCP_HDR_LEN_TO_BYTES(Cache->TcpHdr->th_len) - sizeof(Storage->TcpHdr),
+                &Cache->TcpHdrOptions);
+    }
+
+    Cache->TcpValid = Valid;
+}
+
+static
+VOID
 XdpParseFragmentedFrame(
     _In_ XDP_FRAME *Frame,
     _In_ XDP_RING *FragmentRing,
@@ -336,11 +435,33 @@ XdpParseFragmentedFrame(
         return;
     }
 
-    if (IpProto == IPPROTO_UDP && !Cache->UdpValid) {
-        XdpParseFragmentedUdp(
-            Frame, &Buffer, &BufferDataOffset, &FragmentIndex, &FragmentCount, FragmentRing,
-            VirtualAddressExtension, Cache, Storage);
-        if (Cache->UdpValid) {
+    if (IpProto == IPPROTO_UDP) {
+        if (!Cache->UdpValid) {
+            XdpParseFragmentedUdp(
+                Frame, &Buffer, &BufferDataOffset, &FragmentIndex, &FragmentCount, FragmentRing,
+                VirtualAddressExtension, Cache, Storage);
+
+            if (!Cache->UdpValid) {
+                return;
+            }
+
+            Cache->TransportPayload.Buffer = Buffer;
+            Cache->TransportPayload.BufferDataOffset = BufferDataOffset;
+            Cache->TransportPayload.FragmentCount = FragmentCount;
+            Cache->TransportPayload.FragmentIndex = FragmentIndex;
+            Cache->TransportPayload.IsFragmentedBuffer = TRUE;
+            Cache->TransportPayloadValid = TRUE;
+        }
+    } else if (IpProto == IPPROTO_TCP) {
+        if (!Cache->TcpValid) {
+            XdpParseFragmentedTcp(
+                Frame, &Buffer, &BufferDataOffset, &FragmentIndex, &FragmentCount, FragmentRing,
+                VirtualAddressExtension, Cache, Storage);
+
+            if (!Cache->TcpValid) {
+                return;
+            }
+
             Cache->TransportPayload.Buffer = Buffer;
             Cache->TransportPayload.BufferDataOffset = BufferDataOffset;
             Cache->TransportPayload.FragmentCount = FragmentCount;
@@ -375,6 +496,7 @@ XdpParseFrame(
     Cache->Ip4Cached = TRUE;
     Cache->Ip6Cached = TRUE;
     Cache->UdpCached = TRUE;
+    Cache->TcpCached = TRUE;
     Cache->TransportPayloadCached = TRUE;
 
     //
@@ -421,6 +543,24 @@ XdpParseFrame(
         Cache->UdpHdr = (UDP_HDR *)&Va[Offset];
         Cache->UdpValid = TRUE;
         Offset += sizeof(*Cache->UdpHdr);
+        Cache->TransportPayload.Buffer = Buffer;
+        Cache->TransportPayload.BufferDataOffset = Offset;
+        Cache->TransportPayload.IsFragmentedBuffer = FALSE;
+        Cache->TransportPayloadValid = TRUE;
+    } else if (IpProto == IPPROTO_TCP) {
+        UINT32 HeaderLength;
+        if (Buffer->DataLength < Offset + sizeof(*Cache->TcpHdr)) {
+            goto BufferTooSmall;
+        }
+
+        HeaderLength = TCP_HDR_LEN_TO_BYTES(((TCP_HDR *)&Va[Offset])->th_len);
+        if (Buffer->DataLength < Offset + HeaderLength) {
+            goto BufferTooSmall;
+        }
+
+        Cache->TcpHdr = (TCP_HDR *)&Va[Offset];
+        Cache->TcpValid = TRUE;
+        Offset += HeaderLength;
         Cache->TransportPayload.Buffer = Buffer;
         Cache->TransportPayload.BufferDataOffset = Offset;
         Cache->TransportPayload.IsFragmentedBuffer = FALSE;
@@ -500,7 +640,9 @@ QuicCidMatch(
     _In_ CONST XDP_QUIC_FLOW *Flow
     )
 {
-    if ((Type == XDP_MATCH_QUIC_FLOW_SRC_CID) != (QuicHeader->QuicIsLongHeader == 1)) {
+    if ((Type == XDP_MATCH_QUIC_FLOW_SRC_CID ||
+         Type == XDP_MATCH_TCP_QUIC_FLOW_SRC_CID) !=
+        (QuicHeader->QuicIsLongHeader == 1)) {
         return FALSE;
     }
     ASSERT(Flow->CidOffset + Flow->CidLength <= QUIC_MAX_CID_LENGTH);
@@ -647,6 +789,45 @@ XdpTestBit(
     )
 {
     return (ReadUCharNoFence(&BitMap[Index >> 3]) >> (Index & 0x7)) & 0x1;
+}
+
+static
+XDP_RX_ACTION
+XdpL2Fwd(
+    _In_ XDP_FRAME *Frame,
+    _In_opt_ XDP_RING *FragmentRing,
+    _In_opt_ XDP_EXTENSION *FragmentExtension,
+    _In_ UINT32 FragmentIndex,
+    _In_ XDP_EXTENSION *VirtualAddressExtension,
+    _Inout_ XDP_PROGRAM_FRAME_CACHE *Cache,
+    _Inout_ XDP_PROGRAM_FRAME_STORAGE *Storage
+    )
+{
+    DL_EUI48 TempDlAddress;
+
+    if (!Cache->EthCached) {
+        XdpParseFrame(
+            Frame, FragmentRing, FragmentExtension, FragmentIndex, VirtualAddressExtension,
+            Cache, Storage);
+    }
+
+    if (!Cache->EthValid) {
+        return XDP_RX_ACTION_DROP;
+    }
+
+    TempDlAddress = Cache->EthHdr->Destination;
+    Cache->EthHdr->Destination = Cache->EthHdr->Source;
+    Cache->EthHdr->Source = TempDlAddress;
+
+    if (Frame->Buffer.DataLength < sizeof(*Cache->EthHdr)) {
+        ASSERT(FragmentRing != NULL);
+        ASSERT(FragmentExtension != NULL);
+        XdpCopyMemoryToFrame(
+            Frame, FragmentRing, FragmentExtension, FragmentIndex, VirtualAddressExtension, 0,
+            Cache->EthHdr, sizeof(*Cache->EthHdr));
+    }
+
+    return XDP_RX_ACTION_TX;
 }
 
 _IRQL_requires_max_(DISPATCH_LEVEL)
@@ -827,6 +1008,78 @@ XdpInspect(
             }
             break;
 
+        case XDP_MATCH_IPV4_TCP_PORT_SET:
+            if (!FrameCache.TcpCached) {
+                XdpParseFrame(
+                    Frame, FragmentRing, FragmentExtension, FragmentIndex, VirtualAddressExtension,
+                    &FrameCache, &Program->FrameStorage);
+            }
+            if (FrameCache.Ip4Valid &&
+                IN4_ADDR_EQUAL(
+                    &FrameCache.Ip4Hdr->DestinationAddress,
+                    &Rule->Pattern.IpPortSet.Address.Ipv4) &&
+                FrameCache.TcpValid &&
+                XdpTestBit(Rule->Pattern.IpPortSet.PortSet.PortSet, FrameCache.TcpHdr->th_dport)) {
+                Matched = TRUE;
+            }
+            break;
+
+        case XDP_MATCH_IPV6_TCP_PORT_SET:
+            if (!FrameCache.TcpCached) {
+                XdpParseFrame(
+                    Frame, FragmentRing, FragmentExtension, FragmentIndex, VirtualAddressExtension,
+                    &FrameCache, &Program->FrameStorage);
+            }
+            if (FrameCache.Ip6Valid &&
+                IN6_ADDR_EQUAL(
+                    &FrameCache.Ip6Hdr->DestinationAddress,
+                    &Rule->Pattern.IpPortSet.Address.Ipv6) &&
+                FrameCache.TcpValid &&
+                XdpTestBit(Rule->Pattern.IpPortSet.PortSet.PortSet, FrameCache.TcpHdr->th_dport)) {
+                Matched = TRUE;
+            }
+            break;
+
+        case XDP_MATCH_TCP_DST:
+            if (!FrameCache.TcpCached) {
+                XdpParseFrame(
+                    Frame, FragmentRing, FragmentExtension, FragmentIndex, VirtualAddressExtension,
+                    &FrameCache, &Program->FrameStorage);
+            }
+            if (FrameCache.TcpValid &&
+                FrameCache.TcpHdr->th_dport == Rule->Pattern.Port) {
+                Matched = TRUE;
+            }
+            break;
+
+        case XDP_MATCH_TCP_QUIC_FLOW_SRC_CID:
+        case XDP_MATCH_TCP_QUIC_FLOW_DST_CID:
+            if (!FrameCache.TcpCached || !FrameCache.TransportPayloadCached) {
+                XdpParseFrame(
+                    Frame, FragmentRing, FragmentExtension, FragmentIndex, VirtualAddressExtension,
+                    &FrameCache, &Program->FrameStorage);
+            }
+
+            if (!FrameCache.TcpValid || !FrameCache.TransportPayloadValid ||
+                FrameCache.TcpHdr->th_dport != Rule->Pattern.QuicFlow.UdpPort) {
+                break;
+            }
+
+            if (!FrameCache.QuicCached) {
+                XdpParseQuicHeader(
+                    Frame, FragmentRing, FragmentExtension, FragmentIndex, VirtualAddressExtension,
+                    &FrameCache.TransportPayload, &Program->FrameStorage, &FrameCache);
+            }
+
+            if (FrameCache.QuicValid &&
+                QuicCidMatch(
+                    Rule->Match,
+                    &FrameCache,
+                    &Rule->Pattern.QuicFlow)) {
+                Matched = TRUE;
+            }
+            break;
+
         default:
             ASSERT(FALSE);
             break;
@@ -854,6 +1107,13 @@ XdpInspect(
                 Action = XDP_RX_ACTION_PASS;
                 break;
 
+            case XDP_PROGRAM_ACTION_L2FWD:
+                Action =
+                    XdpL2Fwd(
+                        Frame, FragmentRing, FragmentExtension, FragmentIndex,
+                        VirtualAddressExtension, &FrameCache, &Program->FrameStorage);
+                break;
+
             default:
                 ASSERT(FALSE);
                 break;
@@ -869,32 +1129,34 @@ XdpInspect(
 _IRQL_requires_max_(DISPATCH_LEVEL)
 VOID *
 XdpProgramGetXskBypassTarget(
-    _In_ XDP_PROGRAM *Program
+    _In_ XDP_PROGRAM *Program,
+    _In_ XDP_RX_QUEUE *RxQueue
     )
 {
-    ASSERT(XdpProgramCanXskBypass(Program));
+    DBG_UNREFERENCED_PARAMETER(RxQueue);
+
+    ASSERT(XdpProgramCanXskBypass(Program, RxQueue));
     return Program->Rules[0].Redirect.Target;
 }
 
 //
 // Control path routines.
 //
+typedef struct _XDP_PROGRAM_OBJECT XDP_PROGRAM_OBJECT;
+
+typedef struct _XDP_PROGRAM_BINDING {
+    LIST_ENTRY Link;
+    XDP_RX_QUEUE *RxQueue;
+    LIST_ENTRY RxQueueEntry;
+    XDP_RX_QUEUE_NOTIFICATION_ENTRY RxQueueNotificationEntry;
+    XDP_PROGRAM_OBJECT *OwningProgram;
+} XDP_PROGRAM_BINDING;
 
 typedef struct _XDP_PROGRAM_OBJECT {
     XDP_FILE_OBJECT_HEADER Header;
     XDP_BINDING_HANDLE IfHandle;
-    XDP_RX_QUEUE *RxQueue;
-    XDP_RX_QUEUE_NOTIFICATION_ENTRY RxQueueNotificationEntry;
-    LIST_ENTRY SharingLink;
+    LIST_ENTRY ProgramBindings;
     ULONG_PTR CreatedByPid;
-
-    union {
-        struct {
-            UINT32 SharingEnabled : 1;
-            UINT32 IsMetaProgram : 1;
-        };
-        UINT32 Value;
-    } Flags;
 
     XDP_PROGRAM Program;
 } XDP_PROGRAM_OBJECT;
@@ -902,8 +1164,10 @@ typedef struct _XDP_PROGRAM_OBJECT {
 typedef struct _XDP_PROGRAM_WORKITEM {
     XDP_BINDING_WORKITEM Bind;
     XDP_HOOK_ID HookId;
+    UINT32 IfIndex;
     UINT32 QueueId;
     XDP_PROGRAM_OBJECT *ProgramObject;
+    BOOLEAN BindToAllQueues;
 
     KEVENT CompletionEvent;
     NTSTATUS CompletionStatus;
@@ -921,8 +1185,8 @@ XdpProgramTraceObject(
     )
 {
     TraceInfo(
-        TRACE_CORE, "Program=%p CreatedByPid=%Iu Flags=0x%x",
-        ProgramObject, ProgramObject->CreatedByPid, ProgramObject->Flags.Value);
+        TRACE_CORE, "Program=%p CreatedByPid=%Iu",
+        ProgramObject, ProgramObject->CreatedByPid);
 
     for (UINT32 i = 0; i < ProgramObject->Program.RuleCount; i++) {
         CONST XDP_RULE *Rule = &ProgramObject->Program.Rules[i];
@@ -968,10 +1232,30 @@ XdpProgramTraceObject(
                 WppHexDump(Rule->Pattern.QuicFlow.CidData, Rule->Pattern.QuicFlow.CidLength));
             break;
 
+        case XDP_MATCH_TCP_QUIC_FLOW_SRC_CID:
+            TraceInfo(
+                TRACE_CORE,
+                "Program=%p Rule[%u]=XDP_MATCH_TCP_QUIC_FLOW_SRC_CID "
+                "Port=%u CidOffset=%u CidLength=%u CidData=%!HEXDUMP!",
+                ProgramObject, i, ntohs(Rule->Pattern.QuicFlow.UdpPort),
+                Rule->Pattern.QuicFlow.CidOffset, Rule->Pattern.QuicFlow.CidLength,
+                WppHexDump(Rule->Pattern.QuicFlow.CidData, Rule->Pattern.QuicFlow.CidLength));
+            break;
+
         case XDP_MATCH_QUIC_FLOW_DST_CID:
             TraceInfo(
                 TRACE_CORE,
                 "Program=%p Rule[%u]=XDP_MATCH_QUIC_FLOW_DST_CID "
+                "Port=%u CidOffset=%u CidLength=%u CidData=%!HEXDUMP!",
+                ProgramObject, i, ntohs(Rule->Pattern.QuicFlow.UdpPort),
+                Rule->Pattern.QuicFlow.CidOffset, Rule->Pattern.QuicFlow.CidLength,
+                WppHexDump(Rule->Pattern.QuicFlow.CidData, Rule->Pattern.QuicFlow.CidLength));
+            break;
+
+        case XDP_MATCH_TCP_QUIC_FLOW_DST_CID:
+            TraceInfo(
+                TRACE_CORE,
+                "Program=%p Rule[%u]=XDP_MATCH_TCP_QUIC_FLOW_DST_CID "
                 "Port=%u CidOffset=%u CidLength=%u CidData=%!HEXDUMP!",
                 ProgramObject, i, ntohs(Rule->Pattern.QuicFlow.UdpPort),
                 Rule->Pattern.QuicFlow.CidOffset, Rule->Pattern.QuicFlow.CidLength,
@@ -1023,6 +1307,28 @@ XdpProgramTraceObject(
                 ProgramObject, i, Rule->Pattern.IpPortSet.Address.Ipv6.u.Byte);
             break;
 
+        case XDP_MATCH_IPV4_TCP_PORT_SET:
+            TraceInfo(
+                TRACE_CORE,
+                "Program=%p Rule[%u]=XDP_MATCH_IPV4_TCP_PORT_SET "
+                "Destination=%!IPADDR! PortSet=?",
+                ProgramObject, i, Rule->Pattern.IpPortSet.Address.Ipv4.s_addr);
+            break;
+
+        case XDP_MATCH_IPV6_TCP_PORT_SET:
+            TraceInfo(
+                TRACE_CORE,
+                "Program=%p Rule[%u]=XDP_MATCH_IPV6_TCP_PORT_SET "
+                "Destination=%!IPV6ADDR! PortSet=?",
+                ProgramObject, i, Rule->Pattern.IpPortSet.Address.Ipv6.u.Byte);
+            break;
+
+        case XDP_MATCH_TCP_DST:
+            TraceInfo(
+                TRACE_CORE, "Program=%p Rule[%u]=XDP_MATCH_TCP_DST Port=%u",
+                ProgramObject, i, ntohs(Rule->Pattern.Port));
+            break;
+
         default:
             ASSERT(FALSE);
             break;
@@ -1049,6 +1355,12 @@ XdpProgramTraceObject(
                 ProgramObject, i, Rule->Redirect.TargetType, Rule->Redirect.Target);
             break;
 
+        case XDP_PROGRAM_ACTION_L2FWD:
+            TraceInfo(
+                TRACE_CORE, "Program=%p Rule[%u] Action=XDP_PROGRAM_ACTION_L2FWD",
+                ProgramObject, i);
+            break;
+
         default:
             ASSERT(FALSE);
             break;
@@ -1059,94 +1371,154 @@ XdpProgramTraceObject(
 static
 _IRQL_requires_max_(DISPATCH_LEVEL)
 VOID
-XdpProgramPopulateMetaProgram(
-    _Inout_ XDP_PROGRAM_OBJECT *MetaProgramObject
+XdpProgramUpdateCompiledProgram(
+    _In_ XDP_RX_QUEUE *RxQueue
     )
 {
-    XDP_PROGRAM *MetaProgram = &MetaProgramObject->Program;
-    LIST_ENTRY *Entry = &MetaProgramObject->SharingLink;
+    LIST_ENTRY *BindingListHead = XdpRxQueueGetProgramBindingList(RxQueue);
+    XDP_PROGRAM *Program = XdpRxQueueGetProgram(RxQueue);
+    LIST_ENTRY *Entry = BindingListHead->Flink;
+    UINT32 RuleIndex = 0;
 
-    TraceEnter(TRACE_CORE, "MetaProgram=%p", MetaProgramObject);
+    TraceEnter(TRACE_CORE, "Updating program on RxQueue=%p", RxQueue);
 
-    //
-    // Traverse the shared programs and concatenate their rulesets into the
-    // shared metaprogram. Note that we may be reusing a previously-populated
-    // metaprogram if a shared program is being detached.
-    //
-    MetaProgram->RuleCount = 0;
+    while (Entry != BindingListHead) {
+        XDP_PROGRAM_BINDING* ProgramBinding =
+            CONTAINING_RECORD(Entry, XDP_PROGRAM_BINDING, RxQueueEntry);
+        CONST XDP_PROGRAM_OBJECT *BoundProgramObject = ProgramBinding->OwningProgram;
 
-    while ((Entry = Entry->Flink) != &MetaProgramObject->SharingLink) {
-        CONST XDP_PROGRAM_OBJECT *SharedProgramObject =
-            CONTAINING_RECORD(Entry, XDP_PROGRAM_OBJECT, SharingLink);
-        CONST XDP_PROGRAM *SharedProgram = &SharedProgramObject->Program;
-
-        for (UINT32 i = 0; i < SharedProgram->RuleCount; i++) {
-            MetaProgram->Rules[MetaProgram->RuleCount++] = SharedProgram->Rules[i];
+        for (UINT32 i = 0; i < BoundProgramObject->Program.RuleCount; i++) {
+            Program->Rules[RuleIndex++] = BoundProgramObject->Program.Rules[i];
         }
 
-        ASSERT(MetaProgram->RuleCount != 0);
-        ASSERT(SharedProgramObject->Flags.SharingEnabled);
-
-        TraceInfo(
-            TRACE_CORE, "Merged SharedProgram=%p into MetaProgram=%p",
-            SharedProgramObject, MetaProgramObject);
-        XdpProgramTraceObject(SharedProgramObject);
+        TraceInfo(TRACE_CORE, "Updated ProgramObject=%p", BoundProgramObject);
+        XdpProgramTraceObject(BoundProgramObject);
+        Entry = Entry->Flink;
     }
 
+    //
+    // If the program compiled for this newly added binding failed to be added
+    // to the RX queue, we will end up having Program->RuleCount == RuleIndex.
+    //
+    ASSERT(Program->RuleCount >= RuleIndex);
+    Program->RuleCount = RuleIndex;
     TraceExitSuccess(TRACE_CORE);
+}
+
+static
+_IRQL_requires_max_(DISPATCH_LEVEL)
+NTSTATUS
+XdpProgramCompileNewProgram(
+    _In_ XDP_RX_QUEUE *RxQueue,
+    _Out_ XDP_PROGRAM **Program
+    )
+{
+    NTSTATUS Status;
+    LIST_ENTRY *BindingListHead = XdpRxQueueGetProgramBindingList(RxQueue);
+    LIST_ENTRY *Entry = BindingListHead->Flink;
+    UINT32 RuleCount = 0;
+    XDP_PROGRAM *NewProgram;
+    SIZE_T AllocationSize;
+
+    TraceEnter(TRACE_CORE, "Compiling new program on RxQueue=%p", RxQueue);
+
+    while (Entry != BindingListHead) {
+        XDP_PROGRAM_BINDING* ProgramBinding = CONTAINING_RECORD(Entry, XDP_PROGRAM_BINDING, RxQueueEntry);
+        Status =
+            RtlUInt32Add(
+                RuleCount, ProgramBinding->OwningProgram->Program.RuleCount, &RuleCount);
+        if (!NT_SUCCESS(Status)) {
+            goto Exit;
+        }
+        Entry = Entry->Flink;
+    }
+
+    if (RuleCount == 0) {
+        //
+        // No program bindings on the RX queue.
+        //
+        *Program = NULL;
+        Status = STATUS_SUCCESS;
+        goto Exit;
+    }
+
+    Status = RtlSizeTMult(sizeof(XDP_RULE), RuleCount, &AllocationSize);
+    if (!NT_SUCCESS(Status)) {
+        goto Exit;
+    }
+
+    Status = RtlSizeTAdd(sizeof(*NewProgram), AllocationSize, &AllocationSize);
+    if (!NT_SUCCESS(Status)) {
+        goto Exit;
+    }
+
+    NewProgram = ExAllocatePoolZero(NonPagedPoolNx, AllocationSize, XDP_POOLTAG_PROGRAM);
+    if (NewProgram == NULL) {
+        Status = STATUS_NO_MEMORY;
+        goto Exit;
+    }
+
+    Entry = BindingListHead->Flink;
+    while (Entry != BindingListHead) {
+        XDP_PROGRAM_BINDING* ProgramBinding =
+            CONTAINING_RECORD(Entry, XDP_PROGRAM_BINDING, RxQueueEntry);
+        CONST XDP_PROGRAM_OBJECT *BoundProgramObject = ProgramBinding->OwningProgram;
+
+        for (UINT32 i = 0; i < BoundProgramObject->Program.RuleCount; i++) {
+            NewProgram->Rules[NewProgram->RuleCount++] = BoundProgramObject->Program.Rules[i];
+        }
+
+        Entry = Entry->Flink;
+    }
+
+    ASSERT(NewProgram->RuleCount == RuleCount);
+
+    *Program = NewProgram;
+
+Exit:
+    TraceExitSuccess(TRACE_CORE);
+    return Status;
 }
 
 static
 VOID
 XdpProgramDetachRxQueue(
-    _In_ XDP_PROGRAM_OBJECT *ProgramObject
+    _In_ XDP_PROGRAM_BINDING *ProgramBinding
     )
 {
-    XDP_RX_QUEUE *RxQueue = ProgramObject->RxQueue;
+    XDP_RX_QUEUE *RxQueue = ProgramBinding->RxQueue;
 
-    TraceEnter(TRACE_CORE, "Program=%p", ProgramObject);
+    TraceEnter(
+        TRACE_CORE,
+        "Detach ProgramBinding=%p on ProgramObject=%p from RxQueue=%p",
+        ProgramBinding, ProgramBinding->OwningProgram, ProgramBinding->RxQueue);
 
     ASSERT(RxQueue != NULL);
-    ASSERT(!ProgramObject->Flags.IsMetaProgram);
+    ASSERT(!IsListEmpty(&ProgramBinding->RxQueueEntry));
 
-    if (XdpRxQueueGetProgram(RxQueue) == &ProgramObject->Program) {
-        ASSERT(!ProgramObject->Flags.SharingEnabled);
-        XdpRxQueueDeregisterNotifications(RxQueue, &ProgramObject->RxQueueNotificationEntry);
-        XdpRxQueueSetProgram(RxQueue, NULL);
-    } else if (ProgramObject->Flags.SharingEnabled && !IsListEmpty(&ProgramObject->SharingLink)) {
-        XDP_PROGRAM *MetaProgram = XdpRxQueueGetProgram(RxQueue);
-        XDP_PROGRAM_OBJECT *MetaProgramObject =
-            CONTAINING_RECORD(MetaProgram, XDP_PROGRAM_OBJECT, Program);
+    //
+    // Remove the binding from the RX queue and recompile bound programs.
+    //
+    RemoveEntryList(&ProgramBinding->RxQueueEntry);
+    InitializeListHead(&ProgramBinding->RxQueueEntry);
 
-        //
-        // This program isn't directly attached to the RX queue, but a meta
-        // program is. Remove this program from the metaprogram, and either
-        // update the program ruleset (in-place) or remove the meta-program if
-        // this was the final shared program.
-        //
-        ASSERT(MetaProgram != NULL);
-        ASSERT(MetaProgramObject->Flags.IsMetaProgram);
-
-        XdpRxQueueDeregisterNotifications(RxQueue, &ProgramObject->RxQueueNotificationEntry);
-        RemoveEntryList(&ProgramObject->SharingLink);
-        InitializeListHead(&ProgramObject->SharingLink);
-
-        if (IsListEmpty(&MetaProgramObject->SharingLink)) {
-            XdpRxQueueSetProgram(RxQueue, NULL);
-            ExFreePoolWithTag(MetaProgramObject, XDP_POOLTAG_PROGRAM);
-            TraceInfo(
-                TRACE_CORE, "Detached metaprogram RxQueue=%p Program=%p",
-                RxQueue, MetaProgramObject);
-        } else {
-            XdpRxQueueSync(RxQueue, XdpProgramPopulateMetaProgram, MetaProgramObject);
-            TraceInfo(
-                TRACE_CORE, "Updated metaprogram RxQueue=%p Program=%p",
-                RxQueue, MetaProgramObject);
+    XdpRxQueueDeregisterNotifications(RxQueue, &ProgramBinding->RxQueueNotificationEntry);
+    if (IsListEmpty(XdpRxQueueGetProgramBindingList(ProgramBinding->RxQueue))) {
+        XDP_PROGRAM *OldCompiledProgram = XdpRxQueueGetProgram(RxQueue);
+        XdpRxQueueSetProgram(RxQueue, NULL, NULL, NULL);
+        if (OldCompiledProgram != NULL) {
+            ExFreePoolWithTag(OldCompiledProgram, XDP_POOLTAG_PROGRAM);
         }
+    } else {
+        //
+        // Update the program in-place because we are down sizing the program bindings.
+        //
+        XdpRxQueueSync(RxQueue, XdpProgramUpdateCompiledProgram, RxQueue);
     }
 
     TraceExitSuccess(TRACE_CORE);
 }
+
 static
 VOID
 XdpProgramReleasePortSet(
@@ -1218,17 +1590,29 @@ XdpProgramDelete(
     _In_ XDP_PROGRAM_OBJECT *ProgramObject
     )
 {
-    TraceEnter(TRACE_CORE, "Program=%p", ProgramObject);
+    TraceEnter(TRACE_CORE, "ProgramObject=%p", ProgramObject);
 
-    ASSERT(!ProgramObject->Flags.IsMetaProgram);
+    while (!IsListEmpty(&ProgramObject->ProgramBindings)) {
+        XDP_PROGRAM_BINDING *ProgramBinding =
+            (XDP_PROGRAM_BINDING *)ProgramObject->ProgramBindings.Flink;
 
-    //
-    // Detach the XDP program from the RX queue.
-    //
-    if (ProgramObject->RxQueue != NULL) {
-        XdpProgramDetachRxQueue(ProgramObject);
-        XdpRxQueueDereference(ProgramObject->RxQueue);
-        ProgramObject->RxQueue = NULL;
+        //
+        // Detach the XDP program from the RX queue.
+        // The binding might have already been detached during interface tear-down.
+        //
+        if (!IsListEmpty(&ProgramBinding->RxQueueEntry)) {
+            XdpProgramDetachRxQueue(ProgramBinding);
+        }
+
+        if (ProgramBinding->RxQueue != NULL) {
+            XdpRxQueueDereference(ProgramBinding->RxQueue);
+        }
+
+        RemoveEntryList(&ProgramBinding->Link);
+
+        TraceInfo(
+            TRACE_CORE, "Deleted ProgramBinding %p", ProgramBinding);
+        ExFreePoolWithTag(ProgramBinding, XDP_POOLTAG_PROGRAM_BINDING);
     }
 
     //
@@ -1239,7 +1623,9 @@ XdpProgramDelete(
         XDP_RULE *Rule = &ProgramObject->Program.Rules[Index];
 
         if (Rule->Match == XDP_MATCH_IPV4_UDP_PORT_SET ||
-            Rule->Match == XDP_MATCH_IPV6_UDP_PORT_SET) {
+            Rule->Match == XDP_MATCH_IPV6_UDP_PORT_SET ||
+            Rule->Match == XDP_MATCH_IPV4_TCP_PORT_SET ||
+            Rule->Match == XDP_MATCH_IPV6_TCP_PORT_SET) {
             XdpProgramReleasePortSet(&Rule->Pattern.IpPortSet.PortSet);
         }
 
@@ -1263,8 +1649,8 @@ XdpProgramDelete(
         }
     }
 
-    TraceVerbose(TRACE_CORE, "Deleted Program=%p", ProgramObject);
-    ExFreePoolWithTag(ProgramObject, XDP_POOLTAG_PROGRAM);
+    TraceVerbose(TRACE_CORE, "Deleted ProgramObject=%p", ProgramObject);
+    ExFreePoolWithTag(ProgramObject, XDP_POOLTAG_PROGRAM_OBJECT);
     TraceExitSuccess(TRACE_CORE);
 }
 
@@ -1275,13 +1661,13 @@ XdpProgramRxQueueNotify(
     XDP_RX_QUEUE_NOTIFICATION_TYPE NotificationType
     )
 {
-    XDP_PROGRAM_OBJECT *ProgramObject =
-        CONTAINING_RECORD(NotificationEntry, XDP_PROGRAM_OBJECT, RxQueueNotificationEntry);
+    XDP_PROGRAM_BINDING *ProgramBinding =
+        CONTAINING_RECORD(NotificationEntry, XDP_PROGRAM_BINDING, RxQueueNotificationEntry);
 
     switch (NotificationType) {
 
     case XDP_RX_QUEUE_NOTIFICATION_DELETE:
-        XdpProgramDetachRxQueue(ProgramObject);
+        XdpProgramDetachRxQueue(ProgramBinding);
         break;
 
     }
@@ -1290,22 +1676,21 @@ XdpProgramRxQueueNotify(
 _IRQL_requires_max_(PASSIVE_LEVEL)
 BOOLEAN
 XdpProgramCanXskBypass(
-    _In_ XDP_PROGRAM *Program
+    _In_ XDP_PROGRAM *Program,
+    _In_ XDP_RX_QUEUE *RxQueue
     )
 {
-    XDP_PROGRAM_OBJECT *ProgramObject = CONTAINING_RECORD(Program, XDP_PROGRAM_OBJECT, Program);
-
     return
-        ProgramObject->Flags.SharingEnabled == FALSE &&
         Program->RuleCount == 1 &&
         Program->Rules[0].Match == XDP_MATCH_ALL &&
         Program->Rules[0].Action == XDP_PROGRAM_ACTION_REDIRECT &&
-        Program->Rules[0].Redirect.TargetType == XDP_REDIRECT_TARGET_TYPE_XSK;
+        Program->Rules[0].Redirect.TargetType == XDP_REDIRECT_TARGET_TYPE_XSK &&
+        XskCanBypass(Program->Rules[0].Redirect.Target, RxQueue);
 }
 
 static
 NTSTATUS
-XdpProgramAllocate(
+XdpProgramObjectAllocate(
     _In_ UINT32 RuleCount,
     _Out_ XDP_PROGRAM_OBJECT **NewProgramObject
     )
@@ -1324,14 +1709,14 @@ XdpProgramAllocate(
         goto Exit;
     }
 
-    ProgramObject = ExAllocatePoolZero(NonPagedPoolNx, AllocationSize, XDP_POOLTAG_PROGRAM);
+    ProgramObject = ExAllocatePoolZero(NonPagedPoolNx, AllocationSize, XDP_POOLTAG_PROGRAM_OBJECT);
     if (ProgramObject == NULL) {
         Status = STATUS_NO_MEMORY;
         goto Exit;
     }
 
     ProgramObject->CreatedByPid = (ULONG_PTR)PsGetCurrentProcessId();
-    InitializeListHead(&ProgramObject->SharingLink);
+    InitializeListHead(&ProgramObject->ProgramBindings);
 
 Exit:
 
@@ -1355,7 +1740,7 @@ XdpCaptureProgram(
 
     TraceEnter(TRACE_CORE, "-");
 
-    Status = XdpProgramAllocate(RuleCount, &ProgramObject);
+    Status = XdpProgramObjectAllocate(RuleCount, &ProgramObject);
     if (!NT_SUCCESS(Status)) {
         goto Exit;
     }
@@ -1386,7 +1771,7 @@ XdpCaptureProgram(
         RtlZeroMemory(ValidatedRule, sizeof(*ValidatedRule));
         Program->RuleCount++;
 
-        if (UserRule.Match < XDP_MATCH_ALL || UserRule.Match > XDP_MATCH_IPV6_UDP_PORT_SET) {
+        if (UserRule.Match < XDP_MATCH_ALL || UserRule.Match > XDP_MATCH_TCP_QUIC_FLOW_DST_CID) {
             Status = STATUS_INVALID_PARAMETER;
             goto Exit;
         }
@@ -1400,6 +1785,8 @@ XdpCaptureProgram(
         switch (ValidatedRule->Match) {
         case XDP_MATCH_QUIC_FLOW_SRC_CID:
         case XDP_MATCH_QUIC_FLOW_DST_CID:
+        case XDP_MATCH_TCP_QUIC_FLOW_SRC_CID:
+        case XDP_MATCH_TCP_QUIC_FLOW_DST_CID:
             if (UserRule.Pattern.QuicFlow.CidLength > RTL_FIELD_SIZE(XDP_QUIC_FLOW, CidData)) {
                 Status = STATUS_INVALID_PARAMETER;
                 goto Exit;
@@ -1416,6 +1803,8 @@ XdpCaptureProgram(
             break;
         case XDP_MATCH_IPV4_UDP_PORT_SET:
         case XDP_MATCH_IPV6_UDP_PORT_SET:
+        case XDP_MATCH_IPV4_TCP_PORT_SET:
+        case XDP_MATCH_IPV6_TCP_PORT_SET:
             Status =
                 XdpProgramCapturePortSet(
                     &UserRule.Pattern.IpPortSet.PortSet, RequestorMode,
@@ -1431,7 +1820,7 @@ XdpCaptureProgram(
         }
 
         if (UserRule.Action < XDP_PROGRAM_ACTION_DROP ||
-            UserRule.Action > XDP_PROGRAM_ACTION_REDIRECT) {
+            UserRule.Action > XDP_PROGRAM_ACTION_L2FWD) {
             Status = STATUS_INVALID_PARAMETER;
             goto Exit;
         }
@@ -1483,38 +1872,100 @@ Exit:
 }
 
 static
-VOID
-XdpProgramAttach(
-    _In_ XDP_BINDING_WORKITEM *WorkItem
+NTSTATUS
+XdpProgramValidateIfQueue(
+    _In_ XDP_RX_QUEUE *RxQueue,
+    _In_opt_ VOID *ValidationContext
     )
 {
-    XDP_PROGRAM_WORKITEM *Item = (XDP_PROGRAM_WORKITEM *)WorkItem;
-    XDP_PROGRAM_OBJECT *ProgramObject = Item->ProgramObject;
+    XDP_PROGRAM_OBJECT *ProgramObject = ValidationContext;
     XDP_PROGRAM *Program = &ProgramObject->Program;
-    XDP_PROGRAM *ExistingProgram;
-    XDP_PROGRAM_OBJECT *ExistingProgramObject = NULL;
     NTSTATUS Status;
 
     TraceEnter(TRACE_CORE, "Program=%p", ProgramObject);
 
-    if (Item->HookId.SubLayer != XDP_HOOK_INSPECT) {
-        //
-        // Only RX queue programs are currently supported.
-        //
-        Status = STATUS_NOT_SUPPORTED;
+    //
+    // Perform further rule validation that requires an interface RX queue.
+    //
+    for (ULONG Index = 0; Index < Program->RuleCount; Index++) {
+        XDP_RULE *Rule = &Program->Rules[Index];
+
+        if (Rule->Action == XDP_PROGRAM_ACTION_L2FWD) {
+            if (!XdpRxQueueIsTxActionSupported(XdpRxQueueGetConfig(RxQueue))) {
+                TraceError(
+                    TRACE_CORE, "Program=%p RX queue does not support TX action", ProgramObject);
+                Status = STATUS_NOT_SUPPORTED;
+                goto Exit;
+            }
+        }
+    }
+
+    Status = STATUS_SUCCESS;
+
+Exit:
+
+    TraceExitStatus(TRACE_CORE);
+    return Status;
+}
+
+static
+NTSTATUS
+XdpProgramBindingAllocate(
+    _Out_ XDP_PROGRAM_BINDING **NewProgramBinding,
+    _In_ XDP_PROGRAM_OBJECT *ProgramObject
+    )
+{
+    XDP_PROGRAM_BINDING *ProgramBinding = NULL;
+    NTSTATUS Status;
+
+    ProgramBinding =
+        ExAllocatePoolZero(
+            NonPagedPoolNx, sizeof(*ProgramBinding), XDP_POOLTAG_PROGRAM_BINDING);
+    if (ProgramBinding == NULL) {
+        Status = STATUS_NO_MEMORY;
+        goto Exit;
+    }
+
+    InitializeListHead(&ProgramBinding->RxQueueEntry);
+    InitializeListHead(&ProgramBinding->Link);
+    XdpRxQueueInitializeNotificationEntry(&ProgramBinding->RxQueueNotificationEntry);
+
+    ProgramBinding->OwningProgram = ProgramObject;
+    InsertTailList(&ProgramObject->ProgramBindings, &ProgramBinding->Link);
+
+    Status = STATUS_SUCCESS;
+
+Exit:
+    *NewProgramBinding = ProgramBinding;
+    return Status;
+}
+
+static
+NTSTATUS
+XdpProgramBindingAttach(
+    _In_ XDP_BINDING_HANDLE XdpBinding,
+    _In_ CONST XDP_HOOK_ID *HookId,
+    _Inout_ XDP_PROGRAM_OBJECT *ProgramObject,
+    _In_ UINT32 QueueId
+    )
+{
+    XDP_PROGRAM *Program = &ProgramObject->Program;
+    XDP_PROGRAM_BINDING* ProgramBinding = NULL;
+    XDP_PROGRAM *CompiledProgram = NULL;
+    NTSTATUS Status;
+
+    Status = XdpProgramBindingAllocate(&ProgramBinding, ProgramObject);
+    if (!NT_SUCCESS(Status)) {
         goto Exit;
     }
 
     Status =
         XdpRxQueueFindOrCreate(
-            Item->Bind.BindingHandle, &Item->HookId, Item->QueueId, &ProgramObject->RxQueue);
+            XdpBinding, HookId, QueueId, &ProgramBinding->RxQueue);
     if (!NT_SUCCESS(Status)) {
         goto Exit;
     }
 
-    //
-    // Perform further rule validation that require the interface work queue.
-    //
     for (ULONG Index = 0; Index < Program->RuleCount; Index++) {
         XDP_RULE *Rule = &Program->Rules[Index];
 
@@ -1523,7 +1974,7 @@ XdpProgramAttach(
             switch (Rule->Redirect.TargetType) {
 
             case XDP_REDIRECT_TARGET_TYPE_XSK:
-                Status = XskValidateDatapathHandle(Rule->Redirect.Target, ProgramObject->RxQueue);
+                Status = XskValidateDatapathHandle(Rule->Redirect.Target);
                 if (!NT_SUCCESS(Status)) {
                     goto Exit;
                 }
@@ -1536,126 +1987,135 @@ XdpProgramAttach(
         }
     }
 
-    //
-    // Query the existing top-level program on the queue, if any.
-    //
-    ExistingProgram = XdpRxQueueGetProgram(ProgramObject->RxQueue);
-    if (ExistingProgram != NULL) {
-        ExistingProgramObject = CONTAINING_RECORD(ExistingProgram, XDP_PROGRAM_OBJECT, Program);
+    InsertTailList(
+        XdpRxQueueGetProgramBindingList(ProgramBinding->RxQueue), &ProgramBinding->RxQueueEntry);
+    Status = XdpProgramCompileNewProgram(ProgramBinding->RxQueue, &CompiledProgram);
+    if (!NT_SUCCESS(Status)) {
+        goto Exit;
     }
-
-    if (ProgramObject->Flags.SharingEnabled) {
-        UINT32 MetaRuleCount = Program->RuleCount;
-        XDP_PROGRAM_OBJECT *NewMetaProgramObject = NULL;
-
-        if (ExistingProgramObject != NULL && !ExistingProgramObject->Flags.SharingEnabled) {
-            Status = STATUS_SHARING_VIOLATION;
-            goto Exit;
-        }
-
-        //
-        // Calculate the new total rule count and allocate a new metaprogram.
-        //
-        if (ExistingProgram != NULL) {
-            Status = RtlUInt32Add(MetaRuleCount, ExistingProgram->RuleCount, &MetaRuleCount);
-            if (!NT_SUCCESS(Status)) {
-                goto Exit;
-            }
-        }
-
-        Status = XdpProgramAllocate(MetaRuleCount, &NewMetaProgramObject);
-        if (!NT_SUCCESS(Status)) {
-            goto Exit;
-        }
-
-        NewMetaProgramObject->Flags.SharingEnabled = TRUE;
-        NewMetaProgramObject->Flags.IsMetaProgram = TRUE;
-
-        //
-        // Migrate the list of shared programs from the old metaprogram (if
-        // present) onto the new metaprogram and add our new program to the
-        // list.
-        //
-        if (ExistingProgramObject != NULL) {
-            ASSERT(ExistingProgramObject->Flags.IsMetaProgram);
-            ASSERT(IsListEmpty(&NewMetaProgramObject->SharingLink));
-            ASSERT(!IsListEmpty(&ExistingProgramObject->SharingLink));
-            AppendTailList(&NewMetaProgramObject->SharingLink, &ExistingProgramObject->SharingLink);
-            RemoveEntryList(&ExistingProgramObject->SharingLink);
-            InitializeListHead(&ExistingProgramObject->SharingLink);
-        }
-
-        ASSERT(IsListEmpty(&ProgramObject->SharingLink));
-        InsertTailList(&NewMetaProgramObject->SharingLink, &ProgramObject->SharingLink);
-
-        //
-        // Merge all shared programs into the shared metaprogram ruleset.
-        //
-        XdpProgramPopulateMetaProgram(NewMetaProgramObject);
-
-        //
-        // Synchronize with data path and replace old metaprogram with new
-        // metaprogram. This is guaranteed to succeed when a program is already
-        // attached.
-        //
-        Status = XdpRxQueueSetProgram(ProgramObject->RxQueue, &NewMetaProgramObject->Program);
-        if (NT_SUCCESS(Status)) {
-            TraceInfo(
-                TRACE_CORE, "Attached metaprogram RxQueue=%p Program=%p OldProgram=%p",
-                ProgramObject->RxQueue, ProgramObject, ExistingProgramObject);
-            XdpProgramTraceObject(ProgramObject);
-
-            if (ExistingProgramObject != NULL) {
-                ExFreePoolWithTag(ExistingProgramObject, XDP_POOLTAG_PROGRAM);
-                ExistingProgramObject = NULL;
-            }
-        } else {
-            //
-            // Revert changes to the program, scrap the metaprogram, and bail.
-            // This can happen only if no metaprogram was previously attached.
-            //
-            ASSERT(ExistingProgramObject == NULL);
-
-            RemoveEntryList(&ProgramObject->SharingLink);
-            InitializeListHead(&ProgramObject->SharingLink);
-
-            ASSERT(IsListEmpty(&NewMetaProgramObject->SharingLink));
-            ExFreePoolWithTag(NewMetaProgramObject, XDP_POOLTAG_PROGRAM);
-            goto Exit;
-        }
-    } else {
-        //
-        // The new program has not enabled sharing; directly attach this program
-        // to the queue if it is empty.
-        //
-
-        if (ExistingProgramObject != NULL) {
-            Status = STATUS_DUPLICATE_OBJECTID;
-            goto Exit;
-        }
-
-
-        Status = XdpRxQueueSetProgram(ProgramObject->RxQueue, Program);
-        if (!NT_SUCCESS(Status)) {
-            goto Exit;
-        }
-    }
-
-    TraceInfo(
-        TRACE_CORE, "Attached program RxQueue=%p Program=%p",
-        ProgramObject->RxQueue, ProgramObject);
-    XdpProgramTraceObject(ProgramObject);
 
     //
     // Register for interface/queue removal notifications.
     //
     XdpRxQueueRegisterNotifications(
-        ProgramObject->RxQueue, &ProgramObject->RxQueueNotificationEntry, XdpProgramRxQueueNotify);
+        ProgramBinding->RxQueue, &ProgramBinding->RxQueueNotificationEntry, XdpProgramRxQueueNotify);
+
+    ASSERT(
+        !IsListEmpty(&ProgramBinding->RxQueueEntry) &&
+        !IsListEmpty(&ProgramBinding->Link));
+
+    XDP_PROGRAM *OldCompiledProgram = XdpRxQueueGetProgram(ProgramBinding->RxQueue);
+    Status =
+        XdpRxQueueSetProgram(
+            ProgramBinding->RxQueue, CompiledProgram, XdpProgramValidateIfQueue,
+            ProgramObject);
+    if (!NT_SUCCESS(Status)) {
+        goto Exit;
+    }
+
+    CompiledProgram = NULL;
+
+    if (OldCompiledProgram != NULL) {
+        //
+        // We just swapped in a new compiled program. Delete the old one.
+        //
+        ExFreePoolWithTag(OldCompiledProgram, XDP_POOLTAG_PROGRAM);
+        OldCompiledProgram = NULL;
+    }
+
+    TraceInfo(
+        TRACE_CORE, "Attached ProgramBinding %p RxQueue=%p ProgramObject=%p",
+        ProgramBinding, ProgramBinding->RxQueue, ProgramObject);
+
+Exit:
+
+    if (!NT_SUCCESS(Status)) {
+        if (CompiledProgram != NULL) {
+            ExFreePoolWithTag(CompiledProgram, XDP_POOLTAG_PROGRAM);
+        }
+    }
+
+    return Status;
+}
+
+static
+VOID
+XdpProgramAttach(
+    _In_ XDP_BINDING_WORKITEM *WorkItem
+    )
+{
+    XDP_PROGRAM_WORKITEM *Item = (XDP_PROGRAM_WORKITEM *)WorkItem;
+    XDP_PROGRAM_OBJECT *ProgramObject = Item->ProgramObject;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
+    UINT32 QueueIdStart = Item->QueueId;
+    UINT32 QueueIdEnd = Item->QueueId + 1;
+    XDP_IFSET_HANDLE IfSetHandle = NULL;
+
+    TraceEnter(TRACE_CORE, "ProgramObject=%p", ProgramObject);
+
+    if (Item->HookId.SubLayer != XDP_HOOK_INSPECT) {
+        //
+        // Only RX queue programs are currently supported.
+        //
+        Status = STATUS_NOT_SUPPORTED;
+        goto Exit;
+    }
+
+    if (Item->BindToAllQueues) {
+        VOID *InterfaceOffloadHandle;
+        XDP_RSS_CAPABILITIES RssCapabilities;
+        UINT32 RssCapabilitiesSize = sizeof(RssCapabilities);
+        IfSetHandle = XdpIfFindAndReferenceIfSet(Item->IfIndex, &Item->HookId, 1, NULL);
+        if (IfSetHandle == NULL) {
+            Status = STATUS_NOT_FOUND;
+            goto Exit;
+        }
+
+        Status =
+            XdpIfOpenInterfaceOffloadHandle(
+                IfSetHandle, &Item->HookId, &InterfaceOffloadHandle);
+        if (!NT_SUCCESS(Status)) {
+            goto Exit;
+        }
+
+        Status =
+            XdpIfGetInterfaceOffloadCapabilities(
+                IfSetHandle, InterfaceOffloadHandle,
+                XdpOffloadRss, &RssCapabilities, &RssCapabilitiesSize);
+        XdpIfCloseInterfaceOffloadHandle(IfSetHandle, InterfaceOffloadHandle);
+        if (!NT_SUCCESS(Status)) {
+            goto Exit;
+        }
+
+        TraceInfo(
+            TRACE_CORE, "Attaching ProgramObject=%p to all %u queues",
+            ProgramObject, RssCapabilities.NumberOfReceiveQueues);
+        QueueIdStart = 0;
+        QueueIdEnd = RssCapabilities.NumberOfReceiveQueues;
+    }
+
+    for (UINT32 QueueId = QueueIdStart; QueueId < QueueIdEnd; ++QueueId) {
+        Status =
+            XdpProgramBindingAttach(
+                Item->Bind.BindingHandle, &Item->HookId, ProgramObject, QueueId);
+        if (!NT_SUCCESS(Status)) {
+            //
+            // Failed to attach to one of the RX queues.
+            //
+            // TODO: should we allow it to succeed partially?
+            //
+            goto Exit;
+        }
+    }
 
 Exit:
 
     if (!NT_SUCCESS(Status)) {
         XdpProgramDelete(ProgramObject);
+    }
+
+    if (IfSetHandle != NULL) {
+        XdpIfDereferenceIfSet(IfSetHandle);
     }
 
     Item->CompletionStatus = Status;
@@ -1703,8 +2163,9 @@ XdpIrpCreateProgram(
     XDP_PROGRAM_OBJECT *ProgramObject = NULL;
     NTSTATUS Status;
     CONST UINT32 ValidFlags =
-        XDP_CREATE_PROGRAM_FLAG_GENERIC | XDP_CREATE_PROGRAM_FLAG_NATIVE |
-        XDP_CREATE_PROGRAM_FLAG_SHARE;
+        XDP_CREATE_PROGRAM_FLAG_GENERIC |
+        XDP_CREATE_PROGRAM_FLAG_NATIVE |
+        XDP_CREATE_PROGRAM_FLAG_ALL_QUEUES;
 
     if (Disposition != FILE_CREATE || InputBufferLength < sizeof(*Params)) {
         Status = STATUS_INVALID_PARAMETER;
@@ -1735,6 +2196,8 @@ XdpIrpCreateProgram(
         RequiredMode = &InterfaceMode;
     }
 
+RetryBinding:
+
     BindingHandle = XdpIfFindAndReferenceBinding(Params->IfIndex, &Params->HookId, 1, RequiredMode);
     if (BindingHandle == NULL) {
         Status = STATUS_NOT_FOUND;
@@ -1747,13 +2210,11 @@ XdpIrpCreateProgram(
         goto Exit;
     }
 
-    if (Params->Flags & XDP_CREATE_PROGRAM_FLAG_SHARE) {
-        ProgramObject->Flags.SharingEnabled = TRUE;
-    }
-
     KeInitializeEvent(&WorkItem.CompletionEvent, NotificationEvent, FALSE);
     WorkItem.QueueId = Params->QueueId;
     WorkItem.HookId = Params->HookId;
+    WorkItem.IfIndex = Params->IfIndex;
+    WorkItem.BindToAllQueues = !!(Params->Flags & XDP_CREATE_PROGRAM_FLAG_ALL_QUEUES);
     WorkItem.ProgramObject = ProgramObject;
     WorkItem.Bind.BindingHandle = BindingHandle;
     WorkItem.Bind.WorkRoutine = XdpProgramAttach;
@@ -1765,6 +2226,29 @@ XdpIrpCreateProgram(
     KeWaitForSingleObject(&WorkItem.CompletionEvent, Executive, KernelMode, FALSE, NULL);
 
     Status = WorkItem.CompletionStatus;
+
+    if (Status == STATUS_NOT_SUPPORTED &&
+        XdpIfGetCapabilities(BindingHandle)->Mode == XDP_INTERFACE_MODE_NATIVE &&
+        RequiredMode == NULL) {
+        //
+        // The program failed to attach to the native interface. Since the
+        // application did not require native mode, attempt to fall back to
+        // generic mode.
+        //
+        TraceVerbose(
+            TRACE_CORE,
+            "IfIndex=%u Hook={%!HOOK_LAYER!, %!HOOK_DIR!, %!HOOK_SUBLAYER!} QueueId=%u native mode not supported, trying generic mode",
+            Params->IfIndex, Params->HookId.Layer, Params->HookId.Direction,
+            Params->HookId.SubLayer, Params->QueueId);
+
+        ProgramObject = NULL;
+        XdpIfDereferenceBinding(BindingHandle);
+        BindingHandle = NULL;
+
+        InterfaceMode = XDP_INTERFACE_MODE_GENERIC;
+        RequiredMode = &InterfaceMode;
+        goto RetryBinding;
+    }
 
 Exit:
 

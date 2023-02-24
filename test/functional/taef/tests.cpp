@@ -84,6 +84,14 @@ TEST_MODULE_CLEANUP(ModuleCleanup)
 TEST_CLASS(xdpfunctionaltests)
 {
 public:
+    TEST_METHOD(OpenApi) {
+        ::OpenApiTest();
+    }
+
+    TEST_METHOD(LoadApi) {
+        ::LoadApiTest();
+    }
+
     TEST_METHOD(GenericBinding) {
         ::GenericBinding();
     }
@@ -116,10 +124,6 @@ public:
         ::GenericRxMultiProgram();
     }
 
-    TEST_METHOD(GenericRxMultiProgramConflicts) {
-        ::GenericRxMultiProgramConflicts();
-    }
-
     TEST_METHOD(GenericTxToRxInject) {
         ::GenericTxToRxInject();
     }
@@ -148,44 +152,68 @@ public:
         ::FnMpNativeHandleTest();
     }
 
+    TEST_METHOD(GenericRxAllQueueRedirectV4) {
+        GenericRxAllQueueRedirect(AF_INET);
+    }
+
+    TEST_METHOD(GenericRxAllQueueRedirectV6) {
+        GenericRxAllQueueRedirect(AF_INET6);
+    }
+
     TEST_METHOD(GenericRxMatchUdpV4) {
-        GenericRxMatchUdp(AF_INET, XDP_MATCH_UDP);
+        GenericRxMatch(AF_INET, XDP_MATCH_UDP, TRUE);
     }
 
     TEST_METHOD(GenericRxMatchUdpV6) {
-        GenericRxMatchUdp(AF_INET6, XDP_MATCH_UDP);
+        GenericRxMatch(AF_INET6, XDP_MATCH_UDP, TRUE);
     }
 
     TEST_METHOD(GenericRxMatchUdpPortV4) {
-        GenericRxMatchUdp(AF_INET, XDP_MATCH_UDP_DST);
+        GenericRxMatch(AF_INET, XDP_MATCH_UDP_DST, TRUE);
     }
 
     TEST_METHOD(GenericRxMatchUdpPortV6) {
-        GenericRxMatchUdp(AF_INET6, XDP_MATCH_UDP_DST);
+        GenericRxMatch(AF_INET6, XDP_MATCH_UDP_DST, TRUE);
     }
 
     TEST_METHOD(GenericRxMatchUdpTupleV4) {
-        GenericRxMatchUdp(AF_INET, XDP_MATCH_IPV4_UDP_TUPLE);
+        GenericRxMatch(AF_INET, XDP_MATCH_IPV4_UDP_TUPLE, TRUE);
     }
 
     TEST_METHOD(GenericRxMatchUdpTupleV6) {
-        GenericRxMatchUdp(AF_INET6, XDP_MATCH_IPV6_UDP_TUPLE);
+        GenericRxMatch(AF_INET6, XDP_MATCH_IPV6_UDP_TUPLE, TRUE);
     }
 
     TEST_METHOD(GenericRxMatchUdpQuicSrcV4) {
-        GenericRxMatchUdp(AF_INET, XDP_MATCH_QUIC_FLOW_SRC_CID);
+        GenericRxMatch(AF_INET, XDP_MATCH_QUIC_FLOW_SRC_CID, TRUE);
     }
 
     TEST_METHOD(GenericRxMatchUdpQuicSrcV6) {
-        GenericRxMatchUdp(AF_INET6, XDP_MATCH_QUIC_FLOW_SRC_CID);
+        GenericRxMatch(AF_INET6, XDP_MATCH_QUIC_FLOW_SRC_CID, TRUE);
     }
 
     TEST_METHOD(GenericRxMatchUdpQuicDstV4) {
-        GenericRxMatchUdp(AF_INET, XDP_MATCH_QUIC_FLOW_DST_CID);
+        GenericRxMatch(AF_INET, XDP_MATCH_QUIC_FLOW_DST_CID, TRUE);
     }
 
     TEST_METHOD(GenericRxMatchUdpQuicDstV6) {
-        GenericRxMatchUdp(AF_INET6, XDP_MATCH_QUIC_FLOW_DST_CID);
+        GenericRxMatch(AF_INET6, XDP_MATCH_QUIC_FLOW_DST_CID, TRUE);
+    }
+
+    TEST_METHOD(GenericRxMatchTcpQuicSrcV4) {
+        GenericRxMatch(AF_INET, XDP_MATCH_TCP_QUIC_FLOW_SRC_CID, FALSE);
+    }
+
+    TEST_METHOD(GenericRxMatchTcpQuicSrcV6) {
+        GenericRxMatch(AF_INET6, XDP_MATCH_TCP_QUIC_FLOW_SRC_CID, FALSE);
+    }
+
+    TEST_METHOD(GenericRxMatchTcpQuicDstV4) {
+        GenericRxMatch(AF_INET, XDP_MATCH_TCP_QUIC_FLOW_DST_CID, FALSE);
+    }
+
+    TEST_METHOD(GenericRxMatchTcpQuicDstV6) {
+        GenericRxMatch(AF_INET6, XDP_MATCH_TCP_QUIC_FLOW_DST_CID, FALSE);
     }
 
     TEST_METHOD(GenericRxMatchIpPrefixV4) {
@@ -197,19 +225,35 @@ public:
     }
 
     TEST_METHOD(GenericRxMatchUdpPortSetV4) {
-        GenericRxMatchUdp(AF_INET, XDP_MATCH_UDP_PORT_SET);
+        GenericRxMatch(AF_INET, XDP_MATCH_UDP_PORT_SET, TRUE);
     }
 
     TEST_METHOD(GenericRxMatchUdpPortSetV6) {
-        GenericRxMatchUdp(AF_INET6, XDP_MATCH_UDP_PORT_SET);
+        GenericRxMatch(AF_INET6, XDP_MATCH_UDP_PORT_SET, TRUE);
     }
 
     TEST_METHOD(GenericRxMatchIpv4UdpPortSet) {
-        GenericRxMatchUdp(AF_INET, XDP_MATCH_IPV4_UDP_PORT_SET);
+        GenericRxMatch(AF_INET, XDP_MATCH_IPV4_UDP_PORT_SET, TRUE);
     }
 
     TEST_METHOD(GenericRxMatchIpv6UdpPortSet) {
-        GenericRxMatchUdp(AF_INET6, XDP_MATCH_IPV6_UDP_PORT_SET);
+        GenericRxMatch(AF_INET6, XDP_MATCH_IPV6_UDP_PORT_SET, TRUE);
+    }
+
+    TEST_METHOD(GenericRxMatchIpv4TcpPortSet) {
+        GenericRxMatch(AF_INET, XDP_MATCH_IPV4_TCP_PORT_SET, FALSE);
+    }
+
+    TEST_METHOD(GenericRxMatchIpv6TcpPortSet) {
+        GenericRxMatch(AF_INET6, XDP_MATCH_IPV6_TCP_PORT_SET, FALSE);
+    }
+
+    TEST_METHOD(GenericRxMatchTcpPortV4) {
+        GenericRxMatch(AF_INET, XDP_MATCH_TCP_DST, FALSE);
+    }
+
+    TEST_METHOD(GenericRxMatchTcpPortV6) {
+        GenericRxMatch(AF_INET6, XDP_MATCH_TCP_DST, FALSE);
     }
 
     TEST_METHOD(GenericXskWaitRx) {
@@ -249,11 +293,19 @@ public:
     }
 
     TEST_METHOD(GenericRxUdpFragmentQuicLongHeaderV4) {
-        GenericRxUdpFragmentQuicLongHeader(AF_INET);
+        GenericRxUdpFragmentQuicLongHeader(AF_INET, TRUE);
     }
 
     TEST_METHOD(GenericRxUdpFragmentQuicLongHeaderV6) {
-        GenericRxUdpFragmentQuicLongHeader(AF_INET6);
+        GenericRxUdpFragmentQuicLongHeader(AF_INET6, TRUE);
+    }
+
+    TEST_METHOD(GenericRxTcpFragmentQuicLongHeaderV4) {
+        GenericRxUdpFragmentQuicLongHeader(AF_INET, FALSE);
+    }
+
+    TEST_METHOD(GenericRxTcpFragmentQuicLongHeaderV6) {
+        GenericRxUdpFragmentQuicLongHeader(AF_INET6, FALSE);
     }
 
     TEST_METHOD(GenericRxUdpFragmentQuicShortHeaderV4) {
@@ -265,27 +317,63 @@ public:
     }
 
     TEST_METHOD(GenericRxUdpFragmentHeaderDataV4) {
-        GenericRxUdpFragmentHeaderData(AF_INET);
+        GenericRxFragmentHeaderData(AF_INET, TRUE);
     }
 
     TEST_METHOD(GenericRxUdpFragmentHeaderDataV6) {
-        GenericRxUdpFragmentHeaderData(AF_INET6);
+        GenericRxFragmentHeaderData(AF_INET6, TRUE);
+    }
+
+    TEST_METHOD(GenericRxTcpFragmentHeaderDataV4) {
+        GenericRxFragmentHeaderData(AF_INET, FALSE);
+    }
+
+    TEST_METHOD(GenericRxTcpFragmentHeaderDataV6) {
+        GenericRxFragmentHeaderData(AF_INET6, FALSE);
     }
 
     TEST_METHOD(GenericRxUdpTooManyFragmentsV4) {
-        GenericRxUdpTooManyFragments(AF_INET);
+        GenericRxTooManyFragments(AF_INET, TRUE);
     }
 
     TEST_METHOD(GenericRxUdpTooManyFragmentsV6) {
-        GenericRxUdpTooManyFragments(AF_INET6);
+        GenericRxTooManyFragments(AF_INET6, TRUE);
+    }
+
+    TEST_METHOD(GenericRxTcpTooManyFragmentsV4) {
+        GenericRxTooManyFragments(AF_INET, FALSE);
+    }
+
+    TEST_METHOD(GenericRxTcpTooManyFragmentsV6) {
+        GenericRxTooManyFragments(AF_INET6, FALSE);
     }
 
     TEST_METHOD(GenericRxUdpHeaderFragmentsV4) {
-        GenericRxUdpHeaderFragments(AF_INET);
+        GenericRxHeaderFragments(AF_INET, XDP_PROGRAM_ACTION_REDIRECT, TRUE);
     }
 
     TEST_METHOD(GenericRxUdpHeaderFragmentsV6) {
-        GenericRxUdpHeaderFragments(AF_INET6);
+        GenericRxHeaderFragments(AF_INET6, XDP_PROGRAM_ACTION_REDIRECT, TRUE);
+    }
+
+    TEST_METHOD(GenericRxTcpHeaderFragmentsV4) {
+        GenericRxHeaderFragments(AF_INET, XDP_PROGRAM_ACTION_REDIRECT, FALSE);
+    }
+
+    TEST_METHOD(GenericRxTcpHeaderFragmentsV6) {
+        GenericRxHeaderFragments(AF_INET6, XDP_PROGRAM_ACTION_REDIRECT, FALSE);
+    }
+
+    TEST_METHOD(GenericRxL2Fwd) {
+        GenericRxHeaderFragments(AF_INET, XDP_PROGRAM_ACTION_L2FWD, TRUE);
+    }
+
+    TEST_METHOD(GenericRxL2FwdLowResources) {
+        GenericRxHeaderFragments(AF_INET, XDP_PROGRAM_ACTION_L2FWD, TRUE, FALSE, TRUE);
+    }
+
+    TEST_METHOD(GenericRxL2FwdTxInspect) {
+        GenericRxHeaderFragments(AF_INET, XDP_PROGRAM_ACTION_L2FWD, TRUE, TRUE);
     }
 
     TEST_METHOD(GenericRxFromTxInspectV4) {

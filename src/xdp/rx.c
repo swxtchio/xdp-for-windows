@@ -23,6 +23,8 @@ typedef struct _XDP_RX_QUEUE_KEY {
 } XDP_RX_QUEUE_KEY;
 
 typedef struct _XDP_RX_QUEUE {
+    LIST_ENTRY ProgramBindings; // Synchronized by interface work queue.
+
     XDP_PROGRAM *Program;
 
     XDP_RX_QUEUE_DISPATCH Dispatch;
@@ -96,6 +98,14 @@ XdpRxQueueFromHandle(
     )
 {
     return CONTAINING_RECORD(XdpRxQueue, XDP_RX_QUEUE, Dispatch);
+}
+
+XDP_RX_QUEUE *
+XdpRxQueueFromRedirectContext(
+    _In_ XDP_REDIRECT_CONTEXT *RedirectContext
+    )
+{
+    return CONTAINING_RECORD(RedirectContext, XDP_RX_QUEUE, RedirectContext);
 }
 
 static
@@ -243,7 +253,7 @@ XdpReceiveXskExclusiveBatch(
     //
     // Attempt to pass the entire batch to XSK.
     //
-    if (XskReceiveBatchedExclusive(XdpProgramGetXskBypassTarget(RxQueue->Program))) {
+    if (XskReceiveBatchedExclusive(XdpProgramGetXskBypassTarget(RxQueue->Program, RxQueue))) {
         XdpRxQueueExclusiveFlush(RxQueue);
     } else {
         //
@@ -532,6 +542,16 @@ XdpRxQueueGetMaximumFragments(
     return RxQueue->InterfaceRxCapabilities.MaximumFragments;
 }
 
+BOOLEAN
+XdpRxQueueIsTxActionSupported(
+    _In_ XDP_RX_QUEUE_CONFIG_ACTIVATE RxQueueConfig
+    )
+{
+    XDP_RX_QUEUE *RxQueue = XdpRxQueueFromConfigActivate(RxQueueConfig);
+
+    return RxQueue->InterfaceRxCapabilities.TxActionSupported;
+}
+
 static
 CONST XDP_HOOK_ID *
 XdppRxQueueGetHookId(
@@ -656,7 +676,9 @@ XdpRxQueueDetachInterface(
 static
 NTSTATUS
 XdpRxQueueAttachInterface(
-    _In_ XDP_RX_QUEUE *RxQueue
+    _In_ XDP_RX_QUEUE *RxQueue,
+    _In_opt_ XDP_RX_QUEUE_VALIDATE ValidationRoutine,
+    _In_opt_ VOID *ValidationContext
     )
 {
     NTSTATUS Status;
@@ -768,10 +790,17 @@ XdpRxQueueAttachInterface(
 
     RxQueue->ConfigActivate.Dispatch = &XdpRxConfigActivateDispatch;
 
+    if (ValidationRoutine != NULL) {
+        Status = ValidationRoutine(RxQueue, ValidationContext);
+        if (!NT_SUCCESS(Status)) {
+            goto Exit;
+        }
+    }
+
     //
     // Implement a fast path for a single XSK receiving all frames.
     //
-    if (XdpProgramCanXskBypass(RxQueue->Program)) {
+    if (XdpProgramCanXskBypass(RxQueue->Program, RxQueue)) {
         RxQueue->Dispatch = XdpRxExclusiveXskDispatch;
     } else {
         RxQueue->Dispatch = XdpRxDispatch;
@@ -888,6 +917,7 @@ XdpRxQueueCreate(
     XdpInitializeReferenceCount(&RxQueue->ReferenceCount);
     RxQueue->State = XdpRxQueueStateUnbound;
     XdpIfInitializeClientEntry(&RxQueue->BindingClientEntry);
+    InitializeListHead(&RxQueue->ProgramBindings);
     InitializeListHead(&RxQueue->NotifyClients);
     XdpQueueSyncInitialize(&RxQueue->Sync);
     RxQueue->Binding = Binding;
@@ -961,6 +991,14 @@ XdpRxQueueFindOrCreate(
 }
 
 VOID
+XdpRxQueueInitializeNotificationEntry(
+    _Inout_ XDP_RX_QUEUE_NOTIFICATION_ENTRY *NotifyEntry
+    )
+{
+    InitializeListHead(&NotifyEntry->Link);
+}
+
+VOID
 XdpRxQueueRegisterNotifications(
     _In_ XDP_RX_QUEUE *RxQueue,
     _Inout_ XDP_RX_QUEUE_NOTIFICATION_ENTRY *NotifyEntry,
@@ -982,8 +1020,14 @@ XdpRxQueueDeregisterNotifications(
     )
 {
     UNREFERENCED_PARAMETER(RxQueue);
-
-    RemoveEntryList(&NotifyEntry->Link);
+    //
+    // Checking if the entry is linked before it is removed makes
+    // the caller's clean-up work easier.
+    //
+    if (!IsListEmpty(&NotifyEntry->Link)) {
+        RemoveEntryList(&NotifyEntry->Link);
+        InitializeListHead(&NotifyEntry->Link);
+    }
 }
 
 VOID
@@ -1029,21 +1073,39 @@ XdpRxQueueSwapProgram(
 
     ASSERT(CallbackContext != NULL);
 
+    //
+    // Implement a fast path for a single XSK receiving all frames.
+    //
+    if (XdpProgramCanXskBypass(SwapParams->NewProgram, SwapParams->RxQueue)) {
+        SwapParams->RxQueue->Dispatch = XdpRxExclusiveXskDispatch;
+    } else {
+        SwapParams->RxQueue->Dispatch = XdpRxDispatch;
+    }
+
     SwapParams->RxQueue->Program = SwapParams->NewProgram;
 }
 
 NTSTATUS
 XdpRxQueueSetProgram(
     _In_ XDP_RX_QUEUE *RxQueue,
-    _In_opt_ XDP_PROGRAM *Program
+    _In_opt_ XDP_PROGRAM *Program,
+    _In_opt_ XDP_RX_QUEUE_VALIDATE ValidationRoutine,
+    _In_opt_ VOID *ValidationContext
     )
 {
-    NTSTATUS Status = STATUS_SUCCESS;
+    NTSTATUS Status;
 
     TraceEnter(
         TRACE_CORE, "RxQueue=%p Program=%p OldProgram=%p", RxQueue, Program, RxQueue->Program);
 
     if (Program != NULL && RxQueue->Program != NULL) {
+        if (ValidationRoutine != NULL) {
+            Status = ValidationRoutine(RxQueue, ValidationContext);
+            if (!NT_SUCCESS(Status)) {
+                goto Exit;
+            }
+        }
+
         //
         // Swap the existing program for a new program; perform the swap on the
         // data path execution context to ensure the old program is not touched
@@ -1060,9 +1122,10 @@ XdpRxQueueSetProgram(
         // queue on the interface.
         //
         RxQueue->Program = Program;
-        Status = XdpRxQueueAttachInterface(RxQueue);
+        Status = XdpRxQueueAttachInterface(RxQueue, ValidationRoutine, ValidationContext);
         if (!NT_SUCCESS(Status)) {
             RxQueue->Program = NULL;
+            goto Exit;
         }
     } else {
         //
@@ -1073,8 +1136,20 @@ XdpRxQueueSetProgram(
         RxQueue->Program = NULL;
     }
 
+    Status = STATUS_SUCCESS;
+
+Exit:
+
     TraceExitStatus(TRACE_CORE);
     return Status;
+}
+
+LIST_ENTRY *
+XdpRxQueueGetProgramBindingList(
+    _In_ XDP_RX_QUEUE *RxQueue
+    )
+{
+    return &RxQueue->ProgramBindings;
 }
 
 XDP_PROGRAM *
