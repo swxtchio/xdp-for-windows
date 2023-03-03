@@ -58,8 +58,8 @@ FnLwfTxFlush(
 HRESULT
 FnLwfRxFilter(
     _In_ HANDLE Handle,
-    _In_ VOID *Pattern,
-    _In_ VOID *Mask,
+    _In_ const VOID *Pattern,
+    _In_ const VOID *Mask,
     _In_ UINT32 Length
     )
 {
@@ -204,4 +204,16 @@ FnLwfStatusGetIndication(
         FnLwfIoctl(
             Handle, IOCTL_STATUS_GET_INDICATION, NULL, 0, StatusBuffer, *StatusBufferLength,
             StatusBufferLength, NULL);
+}
+
+HRESULT
+FnLwfDatapathGetState(
+    _In_ HANDLE Handle,
+    BOOLEAN *IsDatapathActive
+    )
+{
+    return
+        FnLwfIoctl(
+            Handle, IOCTL_DATAPATH_GET_STATE, NULL, 0, IsDatapathActive, sizeof(*IsDatapathActive),
+            NULL, NULL);
 }

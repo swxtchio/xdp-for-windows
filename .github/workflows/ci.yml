@@ -23,7 +23,7 @@ permissions: read-all
 jobs:
   build:
     name: Build
-    runs-on: windows-2019
+    runs-on: windows-2022
     strategy:
       fail-fast: false
       matrix:
@@ -31,7 +31,7 @@ jobs:
         platform: [x64]
     steps:
     - name: Checkout repository
-      uses: actions/checkout@755da8c3cf115ac066823e79a1e1788f8940201b
+      uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c
       with:
         submodules: recursive
     - name: Setup MSBuild.exe
@@ -39,8 +39,14 @@ jobs:
     - name: Prepare Machine
       shell: pwsh
       run: tools/prepare-machine.ps1 -ForBuild -Verbose
+    - name: Install LLVM 11.0
+      run: |
+        choco install -y llvm --version 11.0.1 --allow-downgrade
+        echo "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
     - name: Nuget Restore
-      run: nuget.exe restore xdp.sln
+      run: nuget.exe restore xdp.sln -ConfigFile src/nuget.config
+    - name: Prepare for compiling eBPF programs
+      run: tools/prepare-machine.ps1 -ForEbpfBuild -Verbose
     - name: Build
       run: msbuild xdp.sln /m /p:configuration=${{ matrix.configuration }} /p:platform=${{ matrix.platform }}
     - name: Clean up Artifacts
@@ -50,7 +56,7 @@ jobs:
       shell: pwsh
       run: tools/sign.ps1 -Config ${{ matrix.configuration }} -Arch ${{ matrix.platform }}
     - name: Upload Artifacts
-      uses: actions/upload-artifact@3cea5372237819ed00197afe530f5a7ea3e805c8
+      uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce
       with:
         name: bin_${{ matrix.configuration }}_${{ matrix.platform }}
         path: |
@@ -59,7 +65,7 @@ jobs:
           !artifacts/bin/**/*.exp
           !artifacts/bin/**/*.lastcodeanalysissucceeded
     - name: Publish Symbols
-      uses: microsoft/action-publish-symbols@c82a258c03d72d371fe9138fc887c2c6e1778e38
+      uses: microsoft/action-publish-symbols@719c40b80e38bca806f3e01e1e3dd3a67554cd68
       if: github.event_name != 'pull_request'
       with:
         accountName: mscodehub
@@ -85,7 +91,7 @@ jobs:
     runs-on: windows-${{ matrix.windows }}
     steps:
     - name: Checkout repository
-      uses: actions/checkout@755da8c3cf115ac066823e79a1e1788f8940201b
+      uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c
     - name: Check Drivers
       shell: pwsh
       run: tools/check-drivers.ps1 -Verbose
@@ -93,7 +99,7 @@ jobs:
       shell: pwsh
       run: tools/prepare-machine.ps1 -ForTest -NoReboot -Verbose
     - name: Download Artifacts
-      uses: actions/download-artifact@9782bd6a9848b53b110e712e20e42d89988822b7
+      uses: actions/download-artifact@9bc31d5ccc31df68ecc42ccf4149144866c47d8a
       with:
         name: bin_${{ matrix.configuration }}_${{ matrix.platform }}
         path: artifacts/bin
@@ -114,7 +120,7 @@ jobs:
       shell: pwsh
       run: tools/log.ps1 -Convert -Name xdpfunc* -Verbose -Config ${{ matrix.configuration }} -Arch ${{ matrix.platform }}
     - name: Upload Logs
-      uses: actions/upload-artifact@3cea5372237819ed00197afe530f5a7ea3e805c8
+      uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce
       if: ${{ always() }}
       with:
         name: logs_func_win${{ matrix.windows }}_${{ matrix.configuration }}_${{ matrix.platform }}
@@ -130,6 +136,7 @@ jobs:
     env:
       successThresholdPercent: 50
       xdpmpPollProvider: 'FNDIS'
+      queueCount: 1 # GitHub Action VMs have only 2 vCPUs, so ensure 1 CPU is free to spin
       # For 'main' commits
       fullRuntime: 60 # minutes
       fullTimeout: 65 # minutes
@@ -146,7 +153,7 @@ jobs:
     runs-on: windows-${{ matrix.windows }}
     steps:
     - name: Checkout repository
-      uses: actions/checkout@755da8c3cf115ac066823e79a1e1788f8940201b
+      uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c
     - name: Check Drivers
       shell: pwsh
       run: tools/check-drivers.ps1 -Verbose
@@ -154,7 +161,7 @@ jobs:
       shell: pwsh
       run: tools/prepare-machine.ps1 -ForTest -NoReboot -Verbose
     - name: Download Artifacts
-      uses: actions/download-artifact@9782bd6a9848b53b110e712e20e42d89988822b7
+      uses: actions/download-artifact@9bc31d5ccc31df68ecc42ccf4149144866c47d8a
       with:
         name: bin_${{ matrix.configuration }}_${{ matrix.platform }}
         path: artifacts/bin
@@ -162,18 +169,18 @@ jobs:
       if: ${{ github.event_name == 'pull_request' }}
       shell: pwsh
       #timeout-minutes: ${{ env.prTimeout }}
-      run: tools/spinxsk.ps1 -Verbose -Stats -QueueCount 2 -Config ${{ matrix.configuration }} -Arch ${{ matrix.platform }} -Minutes ${{ env.prRuntime }} -XdpmpPollProvider ${{ env.xdpmpPollProvider }} -SuccessThresholdPercent ${{ env.successThresholdPercent }}
+      run: tools/spinxsk.ps1 -Verbose -Stats -QueueCount ${{ env.queueCount }} -Config ${{ matrix.configuration }} -Arch ${{ matrix.platform }} -Minutes ${{ env.prRuntime }} -XdpmpPollProvider ${{ env.xdpmpPollProvider }} -SuccessThresholdPercent ${{ env.successThresholdPercent }}
     - name: Run spinxsk (main)
       if: ${{ github.event_name != 'pull_request' }}
       shell: pwsh
       #timeout-minutes: ${{ env.fullTimeout }}
-      run: tools/spinxsk.ps1 -Verbose -Stats -QueueCount 2 -Config ${{ matrix.configuration }} -Arch ${{ matrix.platform }} -Minutes ${{ env.fullRuntime }} -XdpmpPollProvider ${{ env.xdpmpPollProvider }} -SuccessThresholdPercent ${{ env.successThresholdPercent }}
+      run: tools/spinxsk.ps1 -Verbose -Stats -QueueCount ${{ env.queueCount }} -Config ${{ matrix.configuration }} -Arch ${{ matrix.platform }} -Minutes ${{ env.fullRuntime }} -XdpmpPollProvider ${{ env.xdpmpPollProvider }} -SuccessThresholdPercent ${{ env.successThresholdPercent }}
     - name: Convert Logs
       if: ${{ always() }}
       shell: pwsh
       run: tools/log.ps1 -Convert -Name spinxsk -Verbose -Config ${{ matrix.configuration }} -Arch ${{ matrix.platform }}
     - name: Upload Logs
-      uses: actions/upload-artifact@3cea5372237819ed00197afe530f5a7ea3e805c8
+      uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce
       if: ${{ always() }}
       with:
         name: logs_stress_win${{ matrix.windows }}_${{ matrix.configuration }}_${{ matrix.platform }}
@@ -191,12 +198,12 @@ jobs:
       matrix:
         configuration: [Release]
         platform: [x64]
-    runs-on: windows-2019
+    runs-on: windows-2022
     steps:
     - name: Checkout repository
-      uses: actions/checkout@755da8c3cf115ac066823e79a1e1788f8940201b
+      uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c
     - name: Download Artifacts
-      uses: actions/download-artifact@9782bd6a9848b53b110e712e20e42d89988822b7
+      uses: actions/download-artifact@9bc31d5ccc31df68ecc42ccf4149144866c47d8a
       with:
         name: bin_${{ matrix.configuration }}_${{ matrix.platform }}
         path: artifacts/bin
@@ -207,7 +214,7 @@ jobs:
       shell: pwsh
       run: tools/create-runtime-kit.ps1 -Flavor ${{ matrix.configuration }} -Platform ${{ matrix.platform }}
     - name: Upload Kit
-      uses: actions/upload-artifact@3cea5372237819ed00197afe530f5a7ea3e805c8
+      uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce
       with:
         name: devkit_${{ matrix.configuration }}_${{ matrix.platform }}
         path: artifacts/kit
@@ -222,14 +229,17 @@ jobs:
         configuration: [Release, Debug]
     steps:
     - name: Checkout repository
-      uses: actions/checkout@755da8c3cf115ac066823e79a1e1788f8940201b
+      uses: actions/checkout@ac593985615ec2ede58e132d2e21d2b1cbd6127c
     - name: Setup .NET
-      uses: actions/setup-dotnet@45c9f236cf9a0c09d11298348f6ed06bd81914c0
+      uses: actions/setup-dotnet@607fce577a46308457984d59e4954e075820f10a
       with:
         dotnet-version: 6.0.x
+    - name: Prepare Machine
+      shell: pwsh
+      run: tools/prepare-machine.ps1 -ForBuild -Verbose
     - name: Build
       run: dotnet build src\xdpetwplugin\xdpetwplugin.sln -c ${{ matrix.configuration }}
-    - uses: actions/upload-artifact@3cea5372237819ed00197afe530f5a7ea3e805c8
+    - uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce
       with:
         name: etw_${{ matrix.configuration }}
         path: artifacts/bin

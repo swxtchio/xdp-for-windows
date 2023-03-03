@@ -6,6 +6,9 @@ This prepares a machine for running XDP.
 .PARAMETER ForBuild
     Installs all the build-time dependencies.
 
+.PARAMETER ForEbpfBuild
+    Installs all the eBPF build-time dependencies.
+
 .PARAMETER ForTest
     Installs all the run-time dependencies.
 
@@ -33,6 +36,9 @@ param (
     [switch]$ForBuild = $false,
 
     [Parameter(Mandatory = $false)]
+    [switch]$ForEbpfBuild = $false,
+
+    [Parameter(Mandatory = $false)]
     [switch]$ForTest = $false,
 
     [Parameter(Mandatory = $false)]
@@ -57,15 +63,18 @@ param (
 Set-StrictMode -Version 'Latest'
 $PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
 
-# Disable Invoke-WebRequest progress bar to work around a bug that slows downloads.
-$ProgressPreference = 'SilentlyContinue'
-
 $RootDir = Split-Path $PSScriptRoot -Parent
 . $RootDir\tools\common.ps1
 
-if (!$ForBuild -and !$ForTest -and !$ForFunctionalTest -and !$ForSpinxskTest -and !$ForLogging) {
+if (!$ForBuild -and !$ForEbpfBuild -and !$ForTest -and !$ForFunctionalTest -and !$ForSpinxskTest -and !$ForLogging) {
     Write-Error 'Must one of -ForBuild, -ForTest, -ForFunctionalTest, -ForSpinxskTest, or -ForLogging'
 }
+
+$EbpfNugetVersion = "eBPF-for-Windows.0.6.0"
+$EbpfNugetBuild = "4245975873"
+$EbpfNuget = "$EbpfNugetVersion+$EbpfNugetBuild.nupkg"
+$EbpfNugetUrl = "https://github.com/microsoft/xdp-for-windows/releases/download/main-prerelease/$EbpfNugetVersion+$EbpfNugetBuild.nupkg"
+$EbpfNugetRestoreDir = "$RootDir/packages/$EbpfNugetVersion"
 
 # Flag that indicates something required a reboot.
 $Reboot = $false
@@ -77,9 +86,45 @@ function Download-CoreNet-Deps {
         Remove-Item -Recurse -Force "artifacts/corenet-ci-main"
     }
     if (!(Test-Path "artifacts/corenet-ci-main")) {
-        Invoke-WebRequest -Uri "https://github.com/microsoft/corenet-ci/archive/refs/heads/main.zip" -OutFile "artifacts\corenet-ci.zip"
+        Invoke-WebRequest-WithRetry -Uri "https://github.com/microsoft/corenet-ci/archive/refs/heads/main.zip" -OutFile "artifacts\corenet-ci.zip"
         Expand-Archive -Path "artifacts\corenet-ci.zip" -DestinationPath "artifacts" -Force
         Remove-Item -Path "artifacts\corenet-ci.zip"
+    }
+}
+
+function Download-eBpf-Nuget {
+    # Download and extract private eBPF Nuget package.
+    $NugetDir = "$RootDir/artifacts/nuget"
+    if ($Force -and (Test-Path $NugetDir)) {
+        Remove-Item -Recurse -Force $NugetDir
+    }
+    if (!(Test-Path $NugetDir)) {
+        mkdir $NugetDir | Write-Verbose
+    }
+
+    if (!(Test-Path $NugetDir/$EbpfNuget)) {
+        # Remove any old builds of the package.
+        if (Test-Path $EbpfNugetRestoreDir) {
+            Remove-Item -Recurse -Force $EbpfNugetRestoreDir
+        }
+        Remove-Item -Force $NugetDir/$EbpfNugetVersion*
+
+        Invoke-WebRequest-WithRetry -Uri $EbpfNugetUrl -OutFile $NugetDir/$EbpfNuget
+    }
+}
+
+function Download-Ebpf-Msi {
+    # Download and extract private eBPF installer MSI package.
+    $EbpfMsiUrl = Get-EbpfMsiUrl
+    $EbpfMsiFullPath = Get-EbpfMsiFullPath
+
+    if (!(Test-Path $EbpfMsiFullPath)) {
+        $EbpfMsiDir = Split-Path $EbpfMsiFullPath
+        if (!(Test-Path $EbpfMsiDir)) {
+            mkdir $EbpfMsiDir | Write-Verbose
+        }
+
+        Invoke-WebRequest-WithRetry -Uri $EbpfMsiUrl -OutFile $EbpfMsiFullPath
     }
 }
 
@@ -128,7 +173,7 @@ function Setup-VcRuntime {
         Remove-Item -Force "artifacts\vc_redist.x64.exe" -ErrorAction Ignore
 
         # Download and install.
-        Invoke-WebRequest -Uri "https://aka.ms/vs/16/release/vc_redist.x64.exe" -OutFile "artifacts\vc_redist.x64.exe"
+        Invoke-WebRequest-WithRetry -Uri "https://aka.ms/vs/16/release/vc_redist.x64.exe" -OutFile "artifacts\vc_redist.x64.exe"
         Invoke-Expression -Command "artifacts\vc_redist.x64.exe /install /passive"
     }
 }
@@ -141,7 +186,7 @@ function Setup-VsTest {
         Remove-Item -Recurse -Force "artifacts\Microsoft.TestPlatform" -ErrorAction Ignore
 
         # Download and extract.
-        Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.TestPlatform/16.11.0" -OutFile "artifacts\Microsoft.TestPlatform.zip"
+        Invoke-WebRequest-WithRetry -Uri "https://www.nuget.org/api/v2/package/Microsoft.TestPlatform/16.11.0" -OutFile "artifacts\Microsoft.TestPlatform.zip"
         Expand-Archive -Path "artifacts\Microsoft.TestPlatform.zip" -DestinationPath "artifacts\Microsoft.TestPlatform" -Force
         Remove-Item -Path "artifacts\Microsoft.TestPlatform.zip"
 
@@ -161,8 +206,28 @@ if ($Cleanup) {
 } else {
     if ($ForBuild) {
         Download-CoreNet-Deps
+        Download-eBpf-Nuget
         Copy-Item artifacts\corenet-ci-main\vm-setup\CoreNetSignRoot.cer artifacts\CoreNetSignRoot.cer
         Copy-Item artifacts\corenet-ci-main\vm-setup\CoreNetSign.pfx artifacts\CoreNetSign.pfx
+    }
+
+    if ($ForEbpfBuild) {
+        if (!(Get-Command clang.exe)) {
+            Write-Error "clang.exe is not detected"
+        }
+
+        if (!(cmd /c "clang --version 2>&1" | Select-String "clang version 11.")) {
+            Write-Error "Compiling eBPF programs on Windows requires clang version 11"
+        }
+
+        $EbpfExportProgram = "$EbpfNugetRestoreDir/build/native/bin/export_program_info.exe"
+
+        if (!(Test-Path $EbpfExportProgram)) {
+            Write-Error "Missing eBPF helper export_program_info.exe. Is the NuGet package installed?"
+        }
+
+        Write-Verbose $EbpfExportProgram
+        & $EbpfExportProgram | Write-Verbose
     }
 
     if ($ForFunctionalTest) {
@@ -170,8 +235,8 @@ if ($Cleanup) {
         # Verifier configuration: standard flags on all XDP components, and NDIS.
         # The NDIS verifier is required, otherwise allocations NDIS makes on
         # behalf of XDP components (e.g. NBLs) will not be verified.
-        Write-Verbose "verifier.exe /standard /driver xdp.sys xdpfnmp.sys xdpfnlwf.sys ndis.sys"
-        verifier.exe /standard /driver xdp.sys xdpfnmp.sys xdpfnlwf.sys ndis.sys | Write-Verbose
+        Write-Verbose "verifier.exe /standard /driver xdp.sys xdpfnmp.sys xdpfnlwf.sys ndis.sys ebpfcore.sys"
+        verifier.exe /standard /driver xdp.sys xdpfnmp.sys xdpfnlwf.sys ndis.sys ebpfcore.sys | Write-Verbose
         if (!$?) {
             $Reboot = $true
         }
@@ -190,8 +255,8 @@ if ($Cleanup) {
         # 1   - Delay (in minutes) after boot until simulation engages
         #       This is the lowest value configurable via verifier.exe.
         # WARNING: xdp.sys itself may fail to load due to low resources simulation.
-        Write-Verbose "verifier.exe /standard /faults 599 `"`" `"`" 1  /driver xdp.sys"
-        verifier.exe /standard /faults 599 `"`" `"`" 1  /driver xdp.sys | Write-Verbose
+        Write-Verbose "verifier.exe /standard /faults 599 `"`" `"`" 1  /driver xdp.sys ebpfcore.sys"
+        verifier.exe /standard /faults 599 `"`" `"`" 1  /driver xdp.sys ebpfcore.sys | Write-Verbose
         if (!$?) {
             $Reboot = $true
         }
@@ -200,6 +265,7 @@ if ($Cleanup) {
     if ($ForTest) {
         Setup-TestSigning
         Download-CoreNet-Deps
+        Download-Ebpf-Msi
         Copy-Item artifacts\corenet-ci-main\vm-setup\CoreNetSignRoot.cer artifacts\CoreNetSignRoot.cer
         Copy-Item artifacts\corenet-ci-main\vm-setup\CoreNetSign.pfx artifacts\CoreNetSign.pfx
         Copy-Item artifacts\corenet-ci-main\vm-setup\devcon.exe C:\devcon.exe

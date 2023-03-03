@@ -588,7 +588,7 @@ RemoveLowerEdgeRssSetting(
 
     ASSERT(Filter->Offload.LowerEdge.Rss != NULL);
 
-    XdpGenericDetachIfRx(&Filter->Generic, &Filter->Generic.Rx.Datapath);
+    XdpGenericDetachDatapath(&Filter->Generic, TRUE, FALSE);
 
     //
     // Clear the lower edge setting to imply lower edge has no independent settings.
@@ -738,6 +738,20 @@ XdpLwfOffloadRssSet(
     }
 
     //
+    // There is an NDIS bug where LWFs setting the RSS configuration can cause
+    // a bugcheck if no upper level has previously set the RSS configuration.
+    // To avoid this scenario, prevent setting RSS configuration until the
+    // upper layer has set the configuration.
+    //
+    if (Filter->Offload.UpperEdge.Rss == NULL) {
+        TraceError(
+            TRACE_LWF,
+            "OffloadContext=%p RSS cannot be set without upper layer being set", OffloadContext);
+        Status = STATUS_DEVICE_NOT_READY;
+        goto Exit;
+    }
+
+    //
     // Ensure compatibility with existing settings. Currently, only allow
     // overwrite of a configuration plumbed by the same offload context.
     //
@@ -882,7 +896,9 @@ XdpLwfOffloadRssSet(
     //
     // Inherit unspecified parameters from the current RSS settings.
     //
-    InheritXdpRssParams(&RssSetting->Params, &CurrentRssSetting->Params);
+    InheritXdpRssParams(
+        &RssSetting->Params,
+        (CurrentRssSetting != NULL) ? &CurrentRssSetting->Params : NULL);
 
     //
     // Form and issue the OID.
@@ -1440,7 +1456,7 @@ Exit:
     RtlReleasePushLockExclusive(&Filter->Offload.Lock);
 
     if (AttachRxDatapath) {
-        XdpGenericAttachIfRx(&Filter->Generic, &Filter->Generic.Rx.Datapath);
+        XdpGenericAttachDatapath(&Filter->Generic, TRUE, FALSE);
     }
 
     TraceExitStatus(TRACE_LWF);
@@ -1488,7 +1504,7 @@ Exit:
     RtlReleasePushLockExclusive(&Filter->Offload.Lock);
 
     if (AttachRxDatapath) {
-        XdpGenericAttachIfRx(&Filter->Generic, &Filter->Generic.Rx.Datapath);
+        XdpGenericAttachDatapath(&Filter->Generic, TRUE, FALSE);
     }
 
     TraceExitStatus(TRACE_LWF);

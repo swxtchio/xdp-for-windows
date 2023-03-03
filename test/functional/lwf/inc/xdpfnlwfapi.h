@@ -30,8 +30,8 @@ FnLwfTxFlush(
 HRESULT
 FnLwfRxFilter(
     _In_ HANDLE Handle,
-    _In_ VOID *Pattern,
-    _In_ VOID *Mask,
+    _In_ const VOID *Pattern,
+    _In_ const VOID *Mask,
     _In_ UINT32 Length
     );
 
@@ -75,6 +75,12 @@ FnLwfStatusGetIndication(
     _In_ HANDLE Handle,
     _Inout_ UINT32 *StatusBufferLength,
     _Out_writes_bytes_opt_(*StatusBufferLength) VOID *StatusBuffer
+    );
+
+HRESULT
+FnLwfDatapathGetState(
+    _In_ HANDLE Handle,
+    BOOLEAN *IsDatapathActive
     );
 
 EXTERN_C_END

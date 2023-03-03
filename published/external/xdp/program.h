@@ -75,6 +75,38 @@ typedef enum _XDP_MATCH_TYPE {
     // UDP port enabled in the port set.
     //
     XDP_MATCH_IPV6_UDP_PORT_SET,
+    //
+    // Match IPv4 frames matching the destination address and the destination
+    // TCP port enabled in the port set.
+    //
+    XDP_MATCH_IPV4_TCP_PORT_SET,
+    //
+    // Match IPv6 frames matching the destination address and the destination
+    // TCP port enabled in the port set.
+    //
+    XDP_MATCH_IPV6_TCP_PORT_SET,
+    //
+    // Match frames with a specific TCP port number as their destination port.
+    // The port number is specified by field Port in XDP_MATCH_PATTERN.
+    //
+    XDP_MATCH_TCP_DST,
+    //
+    // Match TCP destination port and QUIC source connection IDs in long header
+    // QUIC packets. The supplied buffer must match the CID at the given offset.
+    //
+    XDP_MATCH_TCP_QUIC_FLOW_SRC_CID,
+    //
+    // Match TCP destination port and QUIC destination connection IDs in short
+    // header QUIC packets. The supplied buffer must match the CID at the given
+    // offset.
+    //
+    XDP_MATCH_TCP_QUIC_FLOW_DST_CID,
+    //
+    // Match frames with a specific TCP port number as their destination port and
+    // TCP control flags (SYN, FIN and RST). The port number is specified by field
+    // Port in XDP_MATCH_PATTERN.
+    //
+    XDP_MATCH_TCP_CONTROL_DST,
 } XDP_MATCH_TYPE;
 
 typedef union _XDP_INET_ADDR {
@@ -167,6 +199,17 @@ typedef enum _XDP_RULE_ACTION {
     // Frame must be redirected to the target specified in XDP_REDIRECT_PARAMS.
     //
     XDP_PROGRAM_ACTION_REDIRECT,
+    //
+    // The frame's ethernet source and destination addresses are swapped and the
+    // frame is directed onto the return path. For native XDP drivers, this
+    // results in an XDP_RX_ACTION_TX.
+    //
+    XDP_PROGRAM_ACTION_L2FWD,
+    //
+    // Reserved for internal use: the action is determined by the specified
+    // eBPF program.
+    //
+    XDP_PROGRAM_ACTION_EBPF,
 } XDP_RULE_ACTION;
 
 //
@@ -184,6 +227,10 @@ typedef struct _XDP_REDIRECT_PARAMS {
     HANDLE Target;
 } XDP_REDIRECT_PARAMS;
 
+typedef struct _XDP_EBPF_PARAMS {
+    HANDLE Target;
+} XDP_EBPF_PARAMS;
+
 //
 // XDP program rule.
 //
@@ -193,6 +240,7 @@ typedef struct _XDP_RULE {
     XDP_RULE_ACTION Action;
     union {
         XDP_REDIRECT_PARAMS Redirect;
+        XDP_EBPF_PARAMS Ebpf;
     };
 } XDP_RULE;
 

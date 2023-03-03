@@ -28,6 +28,7 @@ CONST CHAR *UsageText =
 "       The action to perform on matching frames:\n"
 "       - Pass: Allow the frame to pass through XDP\n"
 "       - Drop: Drop the frame\n"
+"       - L2Fwd: Forward the frame back to the L2 sender\n"
 "\n"
 "FILTER_TYPES:\n"
 "\n"
@@ -130,6 +131,8 @@ ParseArgs(
                 Rule.Action = XDP_PROGRAM_ACTION_PASS;
             } else if (!_stricmp(ArgV[i], "Drop")) {
                 Rule.Action = XDP_PROGRAM_ACTION_DROP;
+            } else if (!_stricmp(ArgV[i], "L2Fwd")) {
+                Rule.Action = XDP_PROGRAM_ACTION_L2FWD;
             } else {
                 LOGERR("Invalid Action");
                 goto Usage;
@@ -177,6 +180,7 @@ main(
     CHAR **argv
     )
 {
+    const XDP_API_TABLE *XdpApi;
     HRESULT Result;
     HANDLE Program;
     CONST XDP_HOOK_ID XdpInspectRxL2 = {
@@ -190,10 +194,18 @@ main(
     //
     ParseArgs(argc, argv);
 
+    Result = XdpOpenApi(XDP_VERSION_PRERELEASE, &XdpApi);
+    if (FAILED(Result)) {
+        LOGERR("XdpOpenApi failed: %x", Result);
+        return 1;
+    }
+
     //
     // Create an XDP program using the parsed rule at the L2 inspect hook point.
     //
-    Result = XdpCreateProgram(IfIndex, &XdpInspectRxL2, QueueId, ProgramFlags, &Rule, 1, &Program);
+    Result =
+        XdpApi->XdpCreateProgram(
+            IfIndex, &XdpInspectRxL2, QueueId, ProgramFlags, &Rule, 1, &Program);
     if (FAILED(Result)) {
         LOGERR("XdpCreateProgram failed: %x", Result);
         return 1;
@@ -203,6 +215,6 @@ main(
     // Let XDP filter frames until this process is terminated.
     //
     Sleep(INFINITE);
-    
+
     return 0;
 }

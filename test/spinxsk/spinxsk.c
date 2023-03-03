@@ -3,8 +3,13 @@
 // Licensed under the MIT License.
 //
 
+#pragma warning(disable:4200) // nonstandard extension used: zero-sized array in struct/union
+#pragma warning(disable:4201) // nonstandard extension used: nameless struct/union
+
 #include <windows.h>
+#include <iphlpapi.h>
 #include <assert.h>
+#include <crtdbg.h>
 #include <stdio.h>
 #define _CRT_RAND_S
 #include <stdlib.h>
@@ -13,12 +18,12 @@
 #include <xdpapi.h>
 #include <xdpapi_internal.h>
 #include <xdprtl.h>
+#include <bpf/bpf.h>
+#include <bpf/libbpf.h>
 
 #include "trace.h"
 #include "util.h"
 #include "spinxsk.tmh"
-
-#pragma warning(disable:4200) // nonstandard extension used: zero-sized array in struct/union
 
 #define SHALLOW_STR_OF(x) #x
 #define STR_OF(x) SHALLOW_STR_OF(x)
@@ -54,9 +59,13 @@ CHAR *HELP =
 "   -CleanDatapath        Avoid actions that invalidate the datapath\n"
 "                         Default: off\n"
 "   -WatchdogCmd <cmd>    Execute a system command after a watchdog violation\n"
+"                         If cmd is \"break\" then a debug breakpoint is\n"
+"                         triggered instead\n"
 "                         Default: \"\"\n"
 "   -SuccessThresholdPercent <count> Minimum socket success rate, percent\n"
 "                         Default: " STR_OF(DEFAULT_SUCCESS_THRESHOLD) "\n"
+"   -EnableEbpf           Enables eBPF testing\n"
+"                         Default: off\n"
 ;
 
 #define ASSERT_FRE(expr) \
@@ -131,10 +140,23 @@ typedef struct {
     QUEUE_CONTEXT *queue;
 } XSK_DATAPATH_SHARED;
 
+typedef enum {
+    ProgramHandleXdp,
+    ProgramHandleEbpf,
+} PROGRAM_HANDLE_TYPE;
+
+typedef struct {
+    PROGRAM_HANDLE_TYPE Type;
+    union {
+        HANDLE Handle;
+        struct bpf_object *BpfObject;
+    };
+} PROGRAM_HANDLE;
+
 typedef struct {
     CRITICAL_SECTION Lock;
     UINT32 HandleCount;
-    HANDLE Handles[8];
+    PROGRAM_HANDLE Handles[8];
 } XSK_PROGRAM_SET;
 
 typedef struct {
@@ -185,6 +207,7 @@ typedef struct {
 struct QUEUE_CONTEXT {
     UINT32 queueId;
 
+    CONST XDP_API_TABLE *xdpApi;
     HANDLE sock;
     HANDLE sharedUmemSock;
     HANDLE rss;
@@ -242,6 +265,7 @@ BOOLEAN verbose = FALSE;
 BOOLEAN cleanDatapath = FALSE;
 BOOLEAN done = FALSE;
 BOOLEAN extraStats = FALSE;
+BOOLEAN enableEbpf = FALSE;
 UINT8 successThresholdPercent = DEFAULT_SUCCESS_THRESHOLD;
 HANDLE stopEvent;
 HANDLE workersDoneEvent;
@@ -355,6 +379,150 @@ FuzzHookId(
 }
 
 HRESULT
+AttachXdpEbpfProgram(
+    _In_ QUEUE_CONTEXT *Queue,
+    _In_ HANDLE Sock,
+    _Inout_ XSK_PROGRAM_SET *RxProgramSet
+    )
+{
+    HRESULT Result;
+    CHAR Path[MAX_PATH];
+    const CHAR *ProgramRelativePath = NULL;
+    struct bpf_object *BpfObject = NULL;
+    struct bpf_program *BpfProgram = NULL;
+    NET_IFINDEX IfIndex = ifindex;
+    int ProgramFd;
+    int AttachFlags = 0;
+    int OriginalThreadPriority;
+
+    //
+    // Since eBPF does not support per-queue programs, attach to the entire
+    // interface.
+    //
+    UNREFERENCED_PARAMETER(Queue);
+
+    //
+    // Since eBPF does not yet support AF_XDP, ignore the socket.
+    //
+    UNREFERENCED_PARAMETER(Sock);
+
+    if (!enableEbpf) {
+        return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+    }
+
+    OriginalThreadPriority = GetThreadPriority(GetCurrentThread());
+    ASSERT_FRE(OriginalThreadPriority != THREAD_PRIORITY_ERROR_RETURN);
+
+    Result = GetCurrentBinaryPath(Path, sizeof(Path));
+    if (FAILED(Result)) {
+        goto Exit;
+    }
+
+    switch (RandUlong() % 3) {
+    case 0:
+        ProgramRelativePath = "\\bpf\\drop.o";
+        break;
+    case 1:
+        ProgramRelativePath = "\\bpf\\pass.sys";
+        break;
+    case 2:
+        ProgramRelativePath = "\\bpf\\l1fwd.o";
+        break;
+    default:
+        ASSERT_FRE(FALSE);
+    }
+
+    ASSERT_FRE(strcat_s(Path, sizeof(Path), ProgramRelativePath) == 0);
+
+    //
+    // To work around control path delays caused by eBPF's epoch implementation,
+    // boost this thread's priority when invoking eBPF APIs.
+    //
+    ASSERT_FRE(SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST));
+
+    TraceVerbose("bpf_object__open(%s)", Path);
+    BpfObject = bpf_object__open(Path);
+    if (BpfObject == NULL) {
+        TraceVerbose("bpf_object__open(%s) failed: %d", Path, errno);
+        Result = E_FAIL;
+        goto Exit;
+    }
+
+    TraceVerbose("bpf_object__next_program(%p, %p)", BpfObject, NULL);
+    BpfProgram = bpf_object__next_program(BpfObject, NULL);
+    if (BpfProgram == NULL) {
+        TraceVerbose("bpf_object__next_program failed: %d", errno);
+        Result = E_FAIL;
+        goto Exit;
+    }
+
+    TraceVerbose("bpf_program__set_type(%p, %d)", BpfProgram, BPF_PROG_TYPE_XDP);
+    if (bpf_program__set_type(BpfProgram, BPF_PROG_TYPE_XDP) < 0) {
+        TraceVerbose("bpf_program__set_type failed: %d", errno);
+        Result = E_FAIL;
+        goto Exit;
+    }
+
+    TraceVerbose("bpf_object__load(%p)", BpfObject);
+    if (bpf_object__load(BpfObject) < 0) {
+        TraceVerbose("bpf_object__load failed: %d", errno);
+        Result = E_FAIL;
+        goto Exit;
+    }
+
+    TraceVerbose("bpf_program__fd(%p)", BpfProgram);
+    ProgramFd = bpf_program__fd(BpfProgram);
+    if (ProgramFd < 0) {
+        TraceVerbose("bpf_program__fd failed: %d", errno);
+        Result = E_FAIL;
+        goto Exit;
+    }
+
+    if ((RandUlong() % 2) == 0) {
+        AttachFlags |= XDP_FLAGS_REPLACE;
+    }
+
+    if ((RandUlong() % 8) == 0) {
+        //
+        // Try IFI_UNSPECIFIED, which is an invalid interface index since XDP
+        // does not support wildcards.
+        //
+        IfIndex = IFI_UNSPECIFIED;
+    }
+
+    TraceVerbose("bpf_xdp_attach(%u, %d, 0x%x, %p)", IfIndex, ProgramFd, AttachFlags, NULL);
+    if (bpf_xdp_attach(IfIndex, ProgramFd, AttachFlags, NULL) < 0) {
+        TraceVerbose("bpf_xdp_attach failed: %d", errno);
+        Result = E_FAIL;
+        goto Exit;
+    }
+
+    EnterCriticalSection(&RxProgramSet->Lock);
+    if (RxProgramSet->HandleCount < RTL_NUMBER_OF(RxProgramSet->Handles)) {
+        RxProgramSet->Handles[RxProgramSet->HandleCount].Type = ProgramHandleEbpf;
+        RxProgramSet->Handles[RxProgramSet->HandleCount].BpfObject = BpfObject;
+        RxProgramSet->HandleCount++;
+        Result = S_OK;
+    } else {
+        Result = E_NOT_SUFFICIENT_BUFFER;
+    }
+    LeaveCriticalSection(&RxProgramSet->Lock);
+
+Exit:
+
+    if (FAILED(Result)) {
+        if (BpfObject != NULL) {
+            TraceVerbose("bpf_object__close(%p)", BpfObject);
+            bpf_object__close(BpfObject);
+        }
+    }
+
+    ASSERT_FRE(SetThreadPriority(GetCurrentThread(), OriginalThreadPriority));
+
+    return Result;
+}
+
+HRESULT
 AttachXdpProgram(
     _In_ QUEUE_CONTEXT *Queue,
     _In_ HANDLE Sock,
@@ -370,10 +538,35 @@ AttachXdpProgram(
     HRESULT res;
     UINT8 *PortSet = NULL;
 
-    rule.Match = XDP_MATCH_ALL;
-    rule.Action = XDP_PROGRAM_ACTION_REDIRECT;
-    rule.Redirect.TargetType = XDP_REDIRECT_TARGET_TYPE_XSK;
-    rule.Redirect.Target = Sock;
+    if (RxRequired) {
+        rule.Match = XDP_MATCH_ALL;
+        rule.Action = XDP_PROGRAM_ACTION_REDIRECT;
+        rule.Redirect.TargetType = XDP_REDIRECT_TARGET_TYPE_XSK;
+        rule.Redirect.Target = Sock;
+    } else {
+        rule.Match = XDP_MATCH_ALL;
+
+        switch (RandUlong() % 4) {
+        case 0:
+            rule.Action = XDP_PROGRAM_ACTION_REDIRECT;
+            rule.Redirect.TargetType = XDP_REDIRECT_TARGET_TYPE_XSK;
+            rule.Redirect.Target = Sock;
+            break;
+
+        case 1:
+            rule.Action = XDP_PROGRAM_ACTION_L2FWD;
+            break;
+
+        case 2:
+            rule.Action = XDP_PROGRAM_ACTION_EBPF;
+            rule.Ebpf.Target =
+                (HANDLE)((((UINT64)(RandUlong() & 0x3)) << 32) | (RandUlong() & 0x3));
+            break;
+
+        case 3:
+            return AttachXdpEbpfProgram(Queue, Sock, RxProgramSet);
+        }
+    }
 
     if (Queue->xdpMode == XdpModeGeneric) {
         flags |= XDP_CREATE_PROGRAM_FLAG_GENERIC;
@@ -381,11 +574,11 @@ AttachXdpProgram(
         flags |= XDP_CREATE_PROGRAM_FLAG_NATIVE;
     }
 
-    if (RandUlong() % 4) {
-        flags |= XDP_CREATE_PROGRAM_FLAG_SHARE;
+    if (RandUlong() % 8) {
+        flags |= XDP_CREATE_PROGRAM_FLAG_ALL_QUEUES;
     }
 
-    res = XskGetSockopt(Sock, XSK_SOCKOPT_RX_HOOK_ID, &hookId, &hookIdSize);
+    res = Queue->xdpApi->XskGetSockopt(Sock, XSK_SOCKOPT_RX_HOOK_ID, &hookId, &hookIdSize);
     if (FAILED(res)) {
         goto Exit;
     }
@@ -400,7 +593,7 @@ AttachXdpProgram(
             goto Exit;
         }
 
-        switch (RandUlong() % 3) {
+        switch (RandUlong() % 5) {
         case 0:
             rule.Match = XDP_MATCH_UDP_PORT_SET;
             rule.Pattern.PortSet.PortSet = RandUlong() % 4 ? PortSet : NULL;
@@ -412,14 +605,26 @@ AttachXdpProgram(
         case 2:
             rule.Match = XDP_MATCH_IPV6_UDP_PORT_SET;
             rule.Pattern.IpPortSet.PortSet.PortSet = RandUlong() % 4 ? PortSet : NULL;
+            break;
+        case 3:
+            rule.Match = XDP_MATCH_IPV4_TCP_PORT_SET;
+            rule.Pattern.IpPortSet.PortSet.PortSet = RandUlong() % 4 ? PortSet : NULL;
+            break;
+        case 4:
+            rule.Match = XDP_MATCH_IPV6_TCP_PORT_SET;
+            rule.Pattern.IpPortSet.PortSet.PortSet = RandUlong() % 4 ? PortSet : NULL;
         }
     }
 
-    res = XdpCreateProgram(ifindex, &hookId, Queue->queueId, flags, &rule, 1, &handle);
+    res =
+        Queue->xdpApi->XdpCreateProgram(
+            ifindex, &hookId, Queue->queueId, flags, &rule, 1, &handle);
     if (SUCCEEDED(res)) {
         EnterCriticalSection(&RxProgramSet->Lock);
         if (RxProgramSet->HandleCount < RTL_NUMBER_OF(RxProgramSet->Handles)) {
-            RxProgramSet->Handles[RxProgramSet->HandleCount++] = handle;
+            RxProgramSet->Handles[RxProgramSet->HandleCount].Type = ProgramHandleXdp;
+            RxProgramSet->Handles[RxProgramSet->HandleCount].Handle = handle;
+            RxProgramSet->HandleCount++;
         } else {
             ASSERT_FRE(CloseHandle(handle));
         }
@@ -440,18 +645,47 @@ DetachXdpProgram(
     _Inout_ XSK_PROGRAM_SET *RxProgramSet
     )
 {
-    HANDLE handle = NULL;
+    HANDLE Handle = NULL;
+    struct bpf_object *BpfObject = NULL;
 
     EnterCriticalSection(&RxProgramSet->Lock);
     if (RxProgramSet->HandleCount > 0) {
         UINT32 detachIndex = RandUlong() % RxProgramSet->HandleCount;
-        handle = RxProgramSet->Handles[detachIndex];
+
+        switch (RxProgramSet->Handles[detachIndex].Type) {
+        case ProgramHandleXdp:
+            Handle = RxProgramSet->Handles[detachIndex].Handle;
+            break;
+
+        case ProgramHandleEbpf:
+            BpfObject = RxProgramSet->Handles[detachIndex].BpfObject;
+            break;
+
+        default:
+            ASSERT_FRE(FALSE);
+        }
         RxProgramSet->Handles[detachIndex] = RxProgramSet->Handles[--RxProgramSet->HandleCount];
     }
     LeaveCriticalSection(&RxProgramSet->Lock);
 
-    if (handle != NULL) {
-        ASSERT_FRE(CloseHandle(handle));
+    if (Handle != NULL) {
+        ASSERT_FRE(CloseHandle(Handle));
+    }
+
+    if (BpfObject != NULL) {
+        int OriginalThreadPriority = GetThreadPriority(GetCurrentThread());
+        ASSERT_FRE(OriginalThreadPriority != THREAD_PRIORITY_ERROR_RETURN);
+
+        //
+        // To work around control path delays caused by eBPF's epoch implementation,
+        // boost this thread's priority when invoking eBPF APIs.
+        //
+        ASSERT_FRE(SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST));
+
+        TraceVerbose("bpf_object__close(%p)", BpfObject);
+        bpf_object__close(BpfObject);
+
+        ASSERT_FRE(SetThreadPriority(GetCurrentThread(), OriginalThreadPriority));
     }
 }
 
@@ -541,6 +775,10 @@ CleanupQueue(
         ASSERT_FRE(res);
     }
 
+    if (Queue->xdpApi != NULL) {
+        XdpCloseApi(Queue->xdpApi);
+    }
+
     DeleteCriticalSection(&Queue->sharedUmemRxProgramSet.Lock);
     DeleteCriticalSection(&Queue->rxProgramSet.Lock);
 
@@ -617,11 +855,11 @@ FuzzRssSet(
     //
 
     if (fuzzer->fuzzerInterface != NULL) {
-        (void)XdpRssSet(fuzzer->fuzzerInterface, RssConfiguration, RssConfigSize);
+        (void)queue->xdpApi->XdpRssSet(fuzzer->fuzzerInterface, RssConfiguration, RssConfigSize);
     } else {
         AcquireSRWLockShared(&queue->rssLock);
         if (queue->rss != NULL) {
-            (void)XdpRssSet(queue->rss, RssConfiguration, RssConfigSize);
+            (void)queue->xdpApi->XdpRssSet(queue->rss, RssConfiguration, RssConfigSize);
         }
         ReleaseSRWLockShared(&queue->rssLock);
     }
@@ -647,11 +885,11 @@ FuzzRssGet(
     UINT32 size = 0;
 
     if (Fuzzer->fuzzerInterface != NULL) {
-        res = XdpRssGet(Fuzzer->fuzzerInterface, NULL, &size);
+        res = Queue->xdpApi->XdpRssGet(Fuzzer->fuzzerInterface, NULL, &size);
     } else {
         AcquireSRWLockShared(&Queue->rssLock);
         if (Queue->rss != NULL) {
-            res = XdpRssGet(Queue->rss, NULL, &size);
+            res = Queue->xdpApi->XdpRssGet(Queue->rss, NULL, &size);
         } else {
             res = E_INVALIDARG;
         }
@@ -671,12 +909,12 @@ FuzzRssGet(
 
     if (Fuzzer->fuzzerInterface != NULL) {
 #pragma prefast(suppress : 6386, "SAL does not understand the mod operator")
-        XdpRssGet(Fuzzer->fuzzerInterface, rssConfiguration, &size);
+        Queue->xdpApi->XdpRssGet(Fuzzer->fuzzerInterface, rssConfiguration, &size);
     } else {
         AcquireSRWLockShared(&Queue->rssLock);
         if (Queue->rss != NULL) {
 #pragma prefast(suppress : 6386, "SAL does not understand the mod operator")
-            XdpRssGet(Queue->rss, rssConfiguration, &size);
+            Queue->xdpApi->XdpRssGet(Queue->rss, rssConfiguration, &size);
         }
         ReleaseSRWLockShared(&Queue->rssLock);
     }
@@ -699,11 +937,11 @@ FuzzRssGetCapabilities(
     UINT32 size = 0;
 
     if (Fuzzer->fuzzerInterface != NULL) {
-        res = XdpRssGetCapabilities(Fuzzer->fuzzerInterface, NULL, &size);
+        res = Queue->xdpApi->XdpRssGetCapabilities(Fuzzer->fuzzerInterface, NULL, &size);
     } else {
         AcquireSRWLockShared(&Queue->rssLock);
         if (Queue->rss != NULL) {
-            res = XdpRssGetCapabilities(Queue->rss, NULL, &size);
+            res = Queue->xdpApi->XdpRssGetCapabilities(Queue->rss, NULL, &size);
         } else {
             res = E_INVALIDARG;
         }
@@ -723,12 +961,12 @@ FuzzRssGetCapabilities(
 
     if (Fuzzer->fuzzerInterface != NULL) {
 #pragma prefast(suppress : 6386, "SAL does not understand the mod operator")
-        XdpRssGetCapabilities(Fuzzer->fuzzerInterface, rssCapabilities, &size);
+        Queue->xdpApi->XdpRssGetCapabilities(Fuzzer->fuzzerInterface, rssCapabilities, &size);
     } else {
         AcquireSRWLockShared(&Queue->rssLock);
         if (Queue->rss != NULL) {
 #pragma prefast(suppress : 6386, "SAL does not understand the mod operator")
-            XdpRssGetCapabilities(Queue->rss, rssCapabilities, &size);
+            Queue->xdpApi->XdpRssGetCapabilities(Queue->rss, rssCapabilities, &size);
         }
         ReleaseSRWLockShared(&Queue->rssLock);
     }
@@ -775,7 +1013,7 @@ FuzzRss(
             fuzzer->fuzzerInterface = NULL;
         }
 
-        XdpInterfaceOpen(ifindex, &fuzzer->fuzzerInterface);
+        queue->xdpApi->XdpInterfaceOpen(ifindex, &fuzzer->fuzzerInterface);
     }
 
     if (RandUlong() % 25 == 0) {
@@ -821,6 +1059,11 @@ InitializeQueue(
     InitializeCriticalSection(&queue->rxProgramSet.Lock);
     InitializeCriticalSection(&queue->sharedUmemRxProgramSet.Lock);
     InitializeSRWLock(&queue->rssLock);
+
+    res = XdpOpenApi(XDP_VERSION_PRERELEASE, &queue->xdpApi);
+    if (FAILED(res)) {
+        goto Exit;
+    }
 
     queue->fuzzers = calloc(queue->fuzzerCount, sizeof(*queue->fuzzers));
     if (queue->fuzzers == NULL) {
@@ -874,13 +1117,13 @@ InitializeQueue(
         queue->scenarioConfig.sharedUmemSockTx = TRUE;
     }
 
-    res = XskCreate(&queue->sock);
+    res = queue->xdpApi->XskCreate(&queue->sock);
     if (FAILED(res)) {
         goto Exit;
     }
 
     if (queue->scenarioConfig.sharedUmemSockRx || queue->scenarioConfig.sharedUmemSockTx) {
-        res = XskCreate(&queue->sharedUmemSock);
+        res = queue->xdpApi->XskCreate(&queue->sharedUmemSock);
         if (FAILED(res)) {
             goto Exit;
         }
@@ -977,7 +1220,7 @@ FuzzSocketUmemSetup(
         }
 
         res =
-            XskSetSockopt(
+            Queue->xdpApi->XskSetSockopt(
                 Sock, XSK_SOCKOPT_UMEM_REG, &umemReg, sizeof(umemReg));
         if (SUCCEEDED(res)) {
             Queue->umemReg = umemReg;
@@ -1011,7 +1254,7 @@ FuzzSocketSharedUmemSetup(
         }
 
         res =
-            XskSetSockopt(
+            Queue->xdpApi->XskSetSockopt(
                 Sock, XSK_SOCKOPT_SHARE_UMEM, &SharedUmemSock, sizeof(SharedUmemSock));
         if (SUCCEEDED(res)) {
             TraceVerbose(
@@ -1058,7 +1301,7 @@ FuzzSocketRxTxSetup(
         if (RandUlong() % 2) {
             FuzzRingSize(Queue, &ringSize);
             res =
-                XskSetSockopt(
+                Queue->xdpApi->XskSetSockopt(
                     Sock, XSK_SOCKOPT_RX_RING_SIZE, &ringSize, sizeof(ringSize));
             if (SUCCEEDED(res)) {
                 WriteBooleanRelease(WasRxSet, TRUE);
@@ -1070,7 +1313,7 @@ FuzzSocketRxTxSetup(
         if (RandUlong() % 2) {
             FuzzRingSize(Queue, &ringSize);
             res =
-                XskSetSockopt(
+                Queue->xdpApi->XskSetSockopt(
                     Sock, XSK_SOCKOPT_TX_RING_SIZE, &ringSize, sizeof(ringSize));
             if (SUCCEEDED(res)) {
                 WriteBooleanRelease(WasTxSet, TRUE);
@@ -1081,14 +1324,14 @@ FuzzSocketRxTxSetup(
     if (RandUlong() % 2) {
         FuzzRingSize(Queue, &ringSize);
         res =
-            XskSetSockopt(
+            Queue->xdpApi->XskSetSockopt(
                 Sock, XSK_SOCKOPT_RX_FILL_RING_SIZE, &ringSize, sizeof(ringSize));
     }
 
     if (RandUlong() % 2) {
         FuzzRingSize(Queue, &ringSize);
         res =
-            XskSetSockopt(
+            Queue->xdpApi->XskSetSockopt(
                 Sock, XSK_SOCKOPT_TX_COMPLETION_RING_SIZE, &ringSize, sizeof(ringSize));
     }
 }
@@ -1113,13 +1356,13 @@ FuzzSocketMisc(
     if (RandUlong() % 2) {
         XSK_RING_INFO_SET ringInfo;
         optSize = sizeof(ringInfo);
-        XskGetSockopt(Sock, XSK_SOCKOPT_RING_INFO, &ringInfo, &optSize);
+        Queue->xdpApi->XskGetSockopt(Sock, XSK_SOCKOPT_RING_INFO, &ringInfo, &optSize);
     }
 
     if (RandUlong() % 2) {
         XSK_STATISTICS stats;
         optSize = sizeof(stats);
-        XskGetSockopt(Sock, XSK_SOCKOPT_STATISTICS, &stats, &optSize);
+        Queue->xdpApi->XskGetSockopt(Sock, XSK_SOCKOPT_STATISTICS, &stats, &optSize);
     }
 
     if (RandUlong() % 2) {
@@ -1129,7 +1372,7 @@ FuzzSocketMisc(
             XDP_HOOK_INSPECT,
         };
         FuzzHookId(&hookId);
-        XskSetSockopt(Sock, XSK_SOCKOPT_RX_HOOK_ID, &hookId, sizeof(hookId));
+        Queue->xdpApi->XskSetSockopt(Sock, XSK_SOCKOPT_RX_HOOK_ID, &hookId, sizeof(hookId));
     }
 
     if (RandUlong() % 2) {
@@ -1139,7 +1382,7 @@ FuzzSocketMisc(
             XDP_HOOK_INJECT,
         };
         FuzzHookId(&hookId);
-        XskSetSockopt(Sock, XSK_SOCKOPT_TX_HOOK_ID, &hookId, sizeof(hookId));
+        Queue->xdpApi->XskSetSockopt(Sock, XSK_SOCKOPT_TX_HOOK_ID, &hookId, sizeof(hookId));
     }
 
     if (RandUlong() % 2) {
@@ -1165,9 +1408,9 @@ FuzzSocketMisc(
         }
 
         if (RandUlong() % 2) {
-            XskNotifySocket(Sock, notifyFlags, timeoutMs, &notifyResult);
+            Queue->xdpApi->XskNotifySocket(Sock, notifyFlags, timeoutMs, &notifyResult);
         } else {
-            XskNotifyAsync(Sock, notifyFlags, &overlapped);
+            Queue->xdpApi->XskNotifyAsync(Sock, notifyFlags, &overlapped);
         }
     }
 
@@ -1196,7 +1439,7 @@ FuzzSocketMisc(
         }
 
         #pragma prefast(suppress:6387) // Intentionally passing NULL parameter.
-        XskGetSockopt(Sock, option, procNumParam, &optSize);
+        Queue->xdpApi->XskGetSockopt(Sock, option, procNumParam, &optSize);
     }
 
     if (!cleanDatapath && !(RandUlong() % 3)) {
@@ -1244,7 +1487,7 @@ FuzzSocketBind(
             bindFlags |= 0x1 << (RandUlong() % 32);
         }
 
-        res = XskBind(Sock, ifindex, Queue->queueId, bindFlags);
+        res = Queue->xdpApi->XskBind(Sock, ifindex, Queue->queueId, bindFlags);
         if (SUCCEEDED(res)) {
             WriteBooleanRelease(WasSockBound, TRUE);
         }
@@ -1253,6 +1496,7 @@ FuzzSocketBind(
 
 VOID
 FuzzSocketActivate(
+    _In_ QUEUE_CONTEXT *Queue,
     _In_ HANDLE Sock,
     _Inout_ BOOLEAN *WasSockActivated
     )
@@ -1265,7 +1509,7 @@ FuzzSocketActivate(
             activateFlags = RandUlong() & RandUlong();
         }
 
-        res = XskActivate(Sock, activateFlags);
+        res = Queue->xdpApi->XskActivate(Sock, activateFlags);
         if (SUCCEEDED(res)) {
             WriteBooleanRelease(WasSockActivated, TRUE);
         }
@@ -1304,7 +1548,9 @@ InitializeDatapath(
     Datapath->flags.wait = FALSE;
     Datapath->txiosize = queue->umemReg.chunkSize - queue->umemReg.headroom;
 
-    res = XskGetSockopt(Datapath->sock, XSK_SOCKOPT_RING_INFO, &ringInfo, &ringInfoSize);
+    res =
+        queue->xdpApi->XskGetSockopt(
+            Datapath->sock, XSK_SOCKOPT_RING_INFO, &ringInfo, &ringInfoSize);
     if (FAILED(res)) {
         goto Exit;
     }
@@ -1390,7 +1636,8 @@ NotifyDriver(
     }
 
     if (DirectionFlags != 0) {
-        XskNotifySocket(Datapath->sock, DirectionFlags, WAIT_DRIVER_TIMEOUT_MS, &notifyResult);
+        Datapath->shared->queue->xdpApi->XskNotifySocket(
+            Datapath->sock, DirectionFlags, WAIT_DRIVER_TIMEOUT_MS, &notifyResult);
     }
 }
 
@@ -1544,7 +1791,9 @@ PrintDatapathStats(
     CHAR txPacketCount[64] = { 0 };
     HRESULT res;
 
-    res = XskGetSockopt(Datapath->sock, XSK_SOCKOPT_STATISTICS, &stats, &optSize);
+    res =
+        Datapath->shared->queue->xdpApi->XskGetSockopt(
+            Datapath->sock, XSK_SOCKOPT_STATISTICS, &stats, &optSize);
     if (FAILED(res)) {
         return;
     }
@@ -1656,9 +1905,10 @@ XskFuzzerWorkerFn(
                 scenarioConfig->sharedUmemSockTx, &scenarioConfig->isSharedUmemSockBound);
         }
 
-        FuzzSocketActivate(queue->sock, &scenarioConfig->isSockActivated);
+        FuzzSocketActivate(queue, queue->sock, &scenarioConfig->isSockActivated);
         if (queue->sharedUmemSock != NULL) {
-            FuzzSocketActivate(queue->sharedUmemSock, &scenarioConfig->isSharedUmemSockActivated);
+            FuzzSocketActivate(
+                queue, queue->sharedUmemSock, &scenarioConfig->isSharedUmemSockActivated);
         }
 
         if (ScenarioConfigComplete(scenarioConfig)) {
@@ -1990,11 +2240,13 @@ WatchdogFn(
                 TraceError( "WATCHDOG exceeded on queue %d", i);
                 printf("WATCHDOG exceeded on queue %d\n", i);
                 if (strlen(watchdogCmd) > 0) {
-                    TraceInfo("watchdogCmd=%s", watchdogCmd);
-                    system(watchdogCmd);
+                    if (!_stricmp(watchdogCmd, "break")) {
+                        DbgRaiseAssertionFailure();
+                    } else {
+                        TraceInfo("watchdogCmd=%s", watchdogCmd);
+                        system(watchdogCmd);
+                    }
                 }
-                DebugBreak();
-                DbgRaiseAssertionFailure();
                 exit(ERROR_TIMEOUT);
             }
         }
@@ -2069,6 +2321,8 @@ ParseArgs(
             }
             successThresholdPercent = (UINT8)atoi(argv[i]);
             TraceVerbose("successThresholdPercent=%u", successThresholdPercent);
+        } else if (!strcmp(argv[i], "-EnableEbpf")) {
+            enableEbpf = TRUE;
         } else {
             Usage();
         }
@@ -2110,6 +2364,15 @@ main(
     HANDLE watchdogThread;
 
     WPP_INIT_TRACING(NULL);
+
+#if DBG
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE | _CRTDBG_MODE_DEBUG);
+    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+    _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE | _CRTDBG_MODE_DEBUG);
+    _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
+    _CrtSetReportMode(_CRT_WARN, _CRTDBG_MODE_FILE | _CRTDBG_MODE_DEBUG);
+    _CrtSetReportFile(_CRT_WARN, _CRTDBG_FILE_STDERR);
+#endif
 
     ParseArgs(argc, argv);
 

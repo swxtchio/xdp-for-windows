@@ -2,6 +2,37 @@
 # Helper functions for XDP project.
 #
 
+# Disable Invoke-WebRequest progress bar to work around a bug that slows downloads.
+$ProgressPreference = 'SilentlyContinue'
+
+function Invoke-WebRequest-WithRetry {
+    param (
+        [Parameter()]
+        [string]$Uri,
+
+        [Parameter()]
+        [string]$OutFile
+    )
+
+    $MaxTries = 10
+    $Success = $false
+
+    foreach ($i in 1..$MaxTries) {
+        try {
+            Invoke-WebRequest -Uri $Uri -OutFile $OutFile
+            $Success = $true
+            break;
+        } catch [System.Net.WebException] {
+            if ($i -lt $MaxTries) {
+                Write-Verbose "Invoke-WebRequest-WithRetry [$i/$MaxTries] Failed to download $Uri"
+                Start-Sleep -Seconds $i
+            } else {
+                throw
+            }
+        }
+    }
+}
+
 function Get-CurrentBranch {
     $env:GIT_REDIRECT_STDERR = '2>&1'
     $CurrentBranch = $null
@@ -61,4 +92,35 @@ function Get-VsTestPath {
     }
 
     return $null
+}
+
+# Returns the eBPF installation path
+function Get-EbpfInstallPath {
+    return "C:\ebpf"
+}
+
+# Returns the eBPF MSI filename
+function Get-EbpfMsiFilename {
+    return "ebpf-for-windows.0.6.0+4245975873.msi"
+}
+
+# Returns the eBPF MSI full path
+function Get-EbpfMsiFullPath {
+    $RootDir = Split-Path $PSScriptRoot -Parent
+    $EbpfMsiFilename = Get-EbpfMsiFilename
+    return "$RootDir/artifacts/ebpfmsi/$EbpfMsiFilename"
+}
+
+# Returns the eBPF MSI download URL
+function Get-EbpfMsiUrl {
+    $EbpfMsiFilename = Get-EbpfMsiFilename
+    return "https://github.com/microsoft/xdp-for-windows/releases/download/main-prerelease/$EbpfMsiFilename"
+}
+
+# Refreshes the PATH environment variable.
+function Refresh-Path {
+    $env:Path=(
+        [System.Environment]::GetEnvironmentVariable("Path","Machine"),
+        [System.Environment]::GetEnvironmentVariable("Path","User")
+    ) -match '.' -join ';'
 }
