@@ -27,6 +27,10 @@ AdapterIrpDeviceIoControl(
         Status = MpIrpOidGetRequest(UserContext->Adapter, Irp, IrpSp);
         break;
 
+    case IOCTL_OID_COMPLETE_REQUEST:
+        Status = MpIrpOidCompleteRequest(UserContext->Adapter, Irp, IrpSp);
+        break;
+
     default:
         Status = STATUS_NOT_SUPPORTED;
         goto Exit;
@@ -43,17 +47,18 @@ AdapterCleanup(
     _In_ ADAPTER_USER_CONTEXT *UserContext
     )
 {
+    KIRQL OldIrql;
+
     if (UserContext->Adapter != NULL) {
         if (UserContext->SetOidFilter) {
-            MpOidCompleteRequest(UserContext->Adapter);
-            MpOidClearFilter(UserContext->Adapter);
+            MpOidClearFilterAndFlush(UserContext->Adapter);
         }
 
-        RtlAcquirePushLockExclusive(&UserContext->Adapter->Lock);
+        KeAcquireSpinLock(&UserContext->Adapter->Lock, &OldIrql);
         if (UserContext->Adapter->UserContext == UserContext) {
             UserContext->Adapter->UserContext = NULL;
         }
-        RtlReleasePushLockExclusive(&UserContext->Adapter->Lock);
+        KeReleaseSpinLock(&UserContext->Adapter->Lock, OldIrql);
 
         MpDereferenceAdapter(UserContext->Adapter);
     }
@@ -98,6 +103,7 @@ AdapterIrpCreate(
     ADAPTER_USER_CONTEXT *UserContext = NULL;
     XDPFNMP_OPEN_ADAPTER *OpenAdapter;
     UINT32 IfIndex;
+    KIRQL OldIrql;
 
     UNREFERENCED_PARAMETER(Irp);
     UNREFERENCED_PARAMETER(Disposition);
@@ -124,17 +130,17 @@ AdapterIrpCreate(
         goto Exit;
     }
 
-    RtlAcquirePushLockExclusive(&UserContext->Adapter->Lock);
+    KeAcquireSpinLock(&UserContext->Adapter->Lock, &OldIrql);
 
     if (UserContext->Adapter->UserContext != NULL) {
         Status = STATUS_DUPLICATE_OBJECTID;
-        RtlReleasePushLockExclusive(&UserContext->Adapter->Lock);
+        KeReleaseSpinLock(&UserContext->Adapter->Lock, OldIrql);
         goto Exit;
     }
 
     UserContext->Adapter->UserContext = UserContext;
 
-    RtlReleasePushLockExclusive(&UserContext->Adapter->Lock);
+    KeReleaseSpinLock(&UserContext->Adapter->Lock, OldIrql);
 
     IrpSp->FileObject->FsContext = UserContext;
     Status = STATUS_SUCCESS;

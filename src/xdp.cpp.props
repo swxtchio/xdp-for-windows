@@ -15,6 +15,10 @@
   <PropertyGroup>
     <IntDir>$(SolutionDir)build\$(Platform)_$(Configuration)\obj\$(ProjectName)\</IntDir>
   </PropertyGroup>
+  <!-- OneBranch goop -->
+  <PropertyGroup>
+    <UseInternalMSUniCrtPackage>true</UseInternalMSUniCrtPackage>
+  </PropertyGroup>
   <!-- Define DBG in Debug configurations -->
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
     <ClCompile>
@@ -28,9 +32,18 @@
         $(SolutionDir)published\external;
         %(AdditionalIncludeDirectories)
       </AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>POOL_NX_OPTIN_AUTO=1;POOL_ZERO_DOWN_LEVEL_SUPPORT=1;FNDIS=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>
+        POOL_NX_OPTIN_AUTO=1;
+        POOL_ZERO_DOWN_LEVEL_SUPPORT=1;
+        %(PreprocessorDefinitions)
+      </PreprocessorDefinitions>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
       <!-- Disable C26812: The enum type '' is unscoped. Prefer 'enum class' over 'enum' -->
       <DisableSpecificWarnings>26812;%(DisableSpecificWarnings)</DisableSpecificWarnings>
     </ClCompile>
+    <Link>
+      <CETCompat>true</CETCompat>
+    </Link>
   </ItemDefinitionGroup>
 </Project>

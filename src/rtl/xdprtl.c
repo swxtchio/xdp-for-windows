@@ -5,24 +5,9 @@
 
 #include "precomp.h"
 
-NTSTATUS
-RtlUInt32RoundUpToPowerOfTwo(
-    _In_ UINT32 Value,
-    _Out_ UINT32 *Result
-    )
-{
-    if (Value > (1ui32 << 31)) {
-        return STATUS_INTEGER_OVERFLOW;
-    }
-
-    if (!RTL_IS_POWER_OF_TWO(Value)) {
-        *Result = 1ui32 << (RtlFindMostSignificantBit(Value) + 1);
-    } else {
-        *Result = Value;
-    }
-
-    return STATUS_SUCCESS;
-}
+EX_RUNDOWN_REF XdpRtlRundown = {
+    .Count = EX_RUNDOWN_ACTIVE
+};
 
 _IRQL_requires_max_(APC_LEVEL)
 _Acquires_exclusive_lock_(Lock)
@@ -131,4 +116,22 @@ RtlRandomNumberInRange(
     Number += Min;
 
     return Number;
+}
+
+NTSTATUS
+XdpRtlStart(
+    VOID
+    )
+{
+    ExReInitializeRundownProtection(&XdpRtlRundown);
+
+    return STATUS_SUCCESS;
+}
+
+VOID
+XdpRtlStop(
+    VOID
+    )
+{
+    ExWaitForRundownProtectionRelease(&XdpRtlRundown);
 }

@@ -33,17 +33,27 @@ param (
     [switch]$ListTestCases = $false,
 
     [Parameter(Mandatory = $false)]
-    [int]$Iterations = 1
+    [int]$Iterations = 1,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$EbpfPreinstalled = $false,
+
+    [Parameter(Mandatory = $false)]
+    [int]$Timeout = 0,
+
+    [Parameter(Mandatory = $false)]
+    [string]$TestBinaryPath = ""
 )
 
 Set-StrictMode -Version 'Latest'
-$PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
+$ErrorActionPreference = 'Stop'
 
 # Important paths.
 $RootDir = Split-Path $PSScriptRoot -Parent
 $ArtifactsDir = "$RootDir\artifacts\bin\$($Arch)_$($Config)"
 $LogsDir = "$RootDir\artifacts\logs"
 $IterationFailureCount = 0
+$IterationTimeout = 0
 
 . $RootDir\tools\common.ps1
 
@@ -52,11 +62,21 @@ if ($VsTestPath -eq $null) {
     Write-Error "Could not find VSTest path"
 }
 
+if ($Timeout -gt 0) {
+    $WatchdogReservedMinutes = 2
+    $IterationTimeout = $Timeout / $Iterations - $WatchdogReservedMinutes
+
+    if ($IterationTimeout -le 0) {
+        Write-Error "Timeout must allow at least $WatchdogReservedMinutes minutes per iteration"
+    }
+}
+
 # Ensure the output path exists.
 New-Item -ItemType Directory -Force -Path $LogsDir | Out-Null
 
 for ($i = 1; $i -le $Iterations; $i++) {
     try {
+        $Watchdog = $null
         $LogName = "xdpfunc"
         if ($Iterations -gt 1) {
             $LogName += "-$i"
@@ -76,28 +96,52 @@ for ($i = 1; $i -le $Iterations; $i++) {
         & "$RootDir\tools\setup.ps1" -Install xdpfnlwf -Config $Config -Arch $Arch
         Write-Verbose "installed xdpfnlwf."
 
-        Write-Verbose "installing ebpf..."
-        & "$RootDir\tools\setup.ps1" -Install ebpf -Config $Config -Arch $Arch
-        Write-Verbose "installed ebpf."
+        if (!$EbpfPreinstalled) {
+            Write-Verbose "installing ebpf..."
+            & "$RootDir\tools\setup.ps1" -Install ebpf -Config $Config -Arch $Arch
+            Write-Verbose "installed ebpf."
+        }
 
-        $Args = @("$ArtifactsDir\xdpfunctionaltests.dll")
+        $TestArgs = @()
+        if (![string]::IsNullOrEmpty($TestBinaryPath)) {
+            $TestArgs += $TestBinaryPath
+        } else {
+            $TestArgs += "$ArtifactsDir\xdpfunctionaltests.dll"
+        }
         if (![string]::IsNullOrEmpty($TestCaseFilter)) {
-            $Args += "/TestCaseFilter:$TestCaseFilter"
+            $TestArgs += "/TestCaseFilter:$TestCaseFilter"
         }
         if ($ListTestCases) {
-            $Args += "/lt"
+            $TestArgs += "/lt"
         }
-        $Args += "/logger:trx"
-        $Args += "/ResultsDirectory:$LogsDir"
+        $TestArgs += "/logger:trx"
+        $TestArgs += "/ResultsDirectory:$LogsDir"
 
-        Write-Verbose "$VsTestPath\vstest.console.exe $Args"
-        & $VsTestPath\vstest.console.exe $Args
+        if ($IterationTimeout -gt 0) {
+            $Watchdog = Start-Job -ScriptBlock {
+                Start-Sleep -Seconds (60 * $Using:IterationTimeout)
+
+                . $Using:RootDir\tools\common.ps1
+                Collect-LiveKD -OutFile "$Using:LogsDir\$Using:LogName-livekd.dmp"
+                Collect-ProcessDump -ProcessName "testhost.exe" -OutFile "$Using:LogsDir\$Using:LogName-testhost.dmp"
+                Stop-Process -Name "vstest.console" -Force
+            }
+        }
+
+        Write-Verbose "$VsTestPath\vstest.console.exe $TestArgs"
+        & $VsTestPath\vstest.console.exe $TestArgs
+
         if ($LastExitCode -ne 0) {
-            Write-Error "[$i/$Iterations] xdpfunctionaltests failed with $LastExitCode" -ErrorAction 'Continue'
+            Write-Error "[$i/$Iterations] xdpfunctionaltests failed with $LastExitCode" -ErrorAction Continue
             $IterationFailureCount++
         }
     } finally {
-        & "$RootDir\tools\setup.ps1" -Uninstall ebpf -Config $Config -Arch $Arch -ErrorAction 'Continue'
+        if ($Watchdog -ne $null) {
+            Remove-Job -Job $Watchdog -Force
+        }
+        if (!$EbpfPreinstalled) {
+            & "$RootDir\tools\setup.ps1" -Uninstall ebpf -Config $Config -Arch $Arch -ErrorAction 'Continue'
+        }
         & "$RootDir\tools\setup.ps1" -Uninstall xdpfnlwf -Config $Config -Arch $Arch -ErrorAction 'Continue'
         & "$RootDir\tools\setup.ps1" -Uninstall xdpfnmp -Config $Config -Arch $Arch -ErrorAction 'Continue'
         & "$RootDir\tools\setup.ps1" -Uninstall xdp -Config $Config -Arch $Arch -ErrorAction 'Continue'

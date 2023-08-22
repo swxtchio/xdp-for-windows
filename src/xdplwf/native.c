@@ -57,8 +57,8 @@ XdpNativeAttachInterface(
 
     Status =
         XdpLwfOidInternalRequest(
-            Native->NdisFilterHandle, NdisRequestQueryInformation,
-            OID_XDP_QUERY_CAPABILITIES, NULL, 0, 0, 0, &BytesReturned);
+            Native->NdisFilterHandle, XDP_OID_REQUEST_INTERFACE_REGULAR,
+            NdisRequestQueryInformation, OID_XDP_QUERY_CAPABILITIES, NULL, 0, 0, 0, &BytesReturned);
 
     if (Status != STATUS_BUFFER_TOO_SMALL) {
         if (!NT_VERIFY(!NT_SUCCESS(Status))) {
@@ -91,8 +91,8 @@ XdpNativeAttachInterface(
 
     Status =
         XdpLwfOidInternalRequest(
-            Native->NdisFilterHandle, NdisRequestQueryInformation,
-            OID_XDP_QUERY_CAPABILITIES, CapabilitiesEx,
+            Native->NdisFilterHandle, XDP_OID_REQUEST_INTERFACE_REGULAR,
+            NdisRequestQueryInformation, OID_XDP_QUERY_CAPABILITIES, CapabilitiesEx,
             BytesReturned, 0, 0, &BytesReturned);
     if (!NT_SUCCESS(Status)) {
         goto Exit;
@@ -135,6 +135,15 @@ XdpNativeDetachInterface(
         // Initiate core XDP cleanup and wait for completion.
         //
         XdpIfRemoveInterfaces(&Native->XdpIfInterfaceHandle, 1);
+    }
+}
+
+VOID
+XdpNativeWaitForDetachInterfaceComplete(
+    _In_ XDP_LWF_NATIVE *Native
+    )
+{
+    if (Native->XdpIfInterfaceHandle != NULL) {
         KeWaitForSingleObject(
             &Native->InterfaceRemovedEvent, Executive, KernelMode, FALSE, NULL);
         Native->XdpIfInterfaceHandle = NULL;
