@@ -1,11 +1,9 @@
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- Defines the XDP version numbers -->
   <PropertyGroup>
-    <!-- Defines the XDP version numbers -->
-    <XdpMajorVersion>1</XdpMajorVersion>
-    <XdpMinorVersion>1</XdpMinorVersion>
-    <XdpPatchVersion>0</XdpPatchVersion>
-    <!-- Project-wide properties -->
-    <EbpfPackagePath>$(SolutionDir)packages\eBPF-for-Windows.0.9.0\</EbpfPackagePath>
+    <XdpMajorVersion>0</XdpMajorVersion>
+    <XdpMinorVersion>16</XdpMinorVersion>
+    <XdpPatchVersion>8</XdpPatchVersion>
   </PropertyGroup>
   <!-- The set of (eventually?) supported configurations -->
   <ItemGroup Label="ProjectConfigurations">
@@ -26,4 +24,8 @@
       <Platform>ARM64</Platform>
     </ProjectConfiguration>
   </ItemGroup>
+  <!-- Project-wide properties -->
+  <PropertyGroup>
+    <EbpfPackagePath>$(SolutionDir)packages\eBPF-for-Windows.0.6.0\</EbpfPackagePath>
+  </PropertyGroup>
 </Project>

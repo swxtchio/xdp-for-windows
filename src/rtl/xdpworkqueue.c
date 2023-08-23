@@ -4,7 +4,6 @@
 //
 
 #include "precomp.h"
-#include "xdpworkqueue.tmh"
 
 #pragma warning(disable:4701) // OldIrql for XdpWorkQueueReleaseLock is initialized.
 
@@ -65,16 +64,11 @@ XdpCreateWorkQueue(
     ASSERT(DriverObject != NULL || DeviceObject != NULL);
     IoObject = (DriverObject != NULL) ? (VOID *)DriverObject : DeviceObject;
 
-    if (!ExAcquireRundownProtection(&XdpRtlRundown)) {
-        return NULL;
-    }
-
     WorkQueue =
         ExAllocatePoolZero(
             MaxIrql < DISPATCH_LEVEL ? PagedPool : NonPagedPoolNx, sizeof(*WorkQueue),
             XDP_POOLTAG_WORKQUEUE);
     if (WorkQueue == NULL) {
-        ExReleaseRundownProtection(&XdpRtlRundown);
         return NULL;
     }
 
@@ -93,7 +87,6 @@ XdpCreateWorkQueue(
             NonPagedPoolNx, IoSizeofWorkItem(), XDP_POOLTAG_WORKQUEUE);
     if (WorkQueue->IoWorkItem == NULL) {
         ExFreePoolWithTag(WorkQueue, XDP_POOLTAG_WORKQUEUE);
-        ExReleaseRundownProtection(&XdpRtlRundown);
         return NULL;
     }
 
@@ -122,7 +115,6 @@ XdpDereferenceWorkQueue(
         IoUninitializeWorkItem(WorkQueue->IoWorkItem);
         ExFreePoolWithTag(WorkQueue->IoWorkItem, XDP_POOLTAG_WORKQUEUE);
         ExFreePoolWithTag(WorkQueue, XDP_POOLTAG_WORKQUEUE);
-        ExReleaseRundownProtection(&XdpRtlRundown);
     }
 }
 
@@ -247,9 +239,8 @@ XdpIoWorkItemRoutine(
     XDP_WORK_QUEUE *WorkQueue = (XDP_WORK_QUEUE *)Context;
     KIRQL OldIrql;
 
-    TraceEnter(TRACE_RTL, "WorkQueue=%p IoObject=%p", WorkQueue, IoObject);
-
     UNREFERENCED_PARAMETER(IoWorkItem);
+    UNREFERENCED_PARAMETER(IoObject);
     ASSERT(WorkQueue);
 
     //
@@ -295,12 +286,5 @@ XdpIoWorkItemRoutine(
         XdpWorkQueueReleaseLock(WorkQueue, OldIrql);
         KeSetEvent(WorkQueue->ShutdownEvent, 0, FALSE);
     }
-
-    //
-    // The work queue holds an indirect reference on the ETW tracing provider,
-    // so trace exit prematurely to ensure the log isn't dropped.
-    //
-    TraceExitSuccess(TRACE_RTL);
-
     XdpDereferenceWorkQueue(WorkQueue);
 }

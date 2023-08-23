@@ -13,7 +13,6 @@
 #include <crtdbg.h>
 #include <ifdef.h>
 #include <xdpapi.h>
-#include <xdpapi_experimental.h>
 #include <xdpassert.h>
 #include <xdpioctl.h>
 #include <xdprtl.h>

@@ -89,17 +89,11 @@ param (
     [int]$YieldCount = 0,
 
     [Parameter(Mandatory=$false)]
-    [switch]$Pacing = $false,
-
-    [Parameter(Mandatory=$false)]
     [string]$OutFile = "",
 
     [Parameter(Mandatory=$false)]
     [string]$XperfFile = ""
 )
-
-Set-StrictMode -Version 'Latest'
-$ErrorActionPreference = 'Stop'
 
 function Wait-NetAdapterUpStatus {
     [CmdletBinding()]
@@ -130,10 +124,8 @@ function Wait-NetAdapterUpStatus {
 }
 
 $RootDir = Split-Path $PSScriptRoot -Parent
-. $RootDir\tools\common.ps1
-
 $ArtifactsDir = "$RootDir\artifacts\bin\$($Arch)_$($Config)"
-$WsaRio = Get-CoreNetCiArtifactPath -Name "wsario.exe"
+$WsaRio = "C:\wsario.exe"
 $Mode = $Mode.ToUpper()
 $Adapter = Get-NetAdapter $AdapterName
 $AdapterIndex = $Adapter.ifIndex
@@ -167,8 +159,6 @@ Write-Verbose "Restarting XDP"
 Restart-Service xdp
 
 try {
-    $WsaRioProcess = $null
-
     #
     # Configure XDPMP.
     #
@@ -192,13 +182,6 @@ try {
                 "$UdpDstPort $UdpSize"
             Write-Verbose "pktcmd.exe $ArgList"
             $UdpPattern = & $ArtifactsDir\pktcmd.exe $ArgList.Split(" ")
-
-            # Since the packet data is set to zero in pktcmd and XDPMP
-            # implicitly sets trailing packet data to zero, truncate the string
-            # to fit within the max NDIS string length.
-            if ($UdpPattern.Length -gt 150) {
-                $UdpPattern = $UdpPattern.Substring(0, 150)
-            }
         } else {
             $UdpPattern = $null
         }
@@ -286,23 +269,17 @@ try {
     # If using TxInspect, generate TX load.
     #
     if ($TxInspect) {
-        if ($XdpMode -ne "Generic") {
-            Write-Error "TxInspect only supported in Generic mode"
+        if ($XdpMode -ne "Generic" -or $Mode -ne "RX") {
+            Write-Error "TxInspect only supported in RX-Generic mode"
         }
 
-        if (@("RX", "FWD").Contains($Mode)) {
-            $WsaRioCpu = $XdpCpu + 5
-            $ArgList =
-                "Winsock Send -Target 192.168.100.2:1234 -Group $XskGroup -CPU $WsaRioCpu " +
-                "-IoSize $UdpSize -IoCount -1 -ThreadCount $TxInspectContentionCount"
-            Write-Verbose "$WsaRio $ArgList"
-            $WsaRioProcess = Start-Process $WsaRio -PassThru -ArgumentList $ArgList
-        }
+        $WsaRioCpu = $XdpCpu + 5
+        $ArgList =
+            "Winsock Send -Target 192.168.100.2:1234 -Group $XskGroup -CPU $WsaRioCpu " +
+            "-IoSize $UdpSize -IoCount -1 -ThreadCount $TxInspectContentionCount"
+        Write-Verbose "$WsaRio $ArgList"
+        $WsaRioProcess = Start-Process $WsaRio -PassThru -ArgumentList $ArgList
     }
-
-    $ThreadParams = @()
-    $QueueParams = @()
-    $GlobalParams = @()
 
     if ($Wait) {
         $ThreadParams += " -w"
@@ -398,7 +375,7 @@ try {
             -EtlPath $XperfFile
     }
 
-    if ($WsaRioProcess) {
+    if ($WsaRioProcess -ne $null) {
         Stop-Process -InputObject $WsaRioProcess
     }
 

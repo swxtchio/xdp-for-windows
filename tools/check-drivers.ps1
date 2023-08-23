@@ -6,20 +6,12 @@ This checks for the presence of any XDP drivers currently loaded.
 #>
 
 [cmdletbinding()]Param(
-    [ValidateSet("Debug", "Release")]
-    [Parameter(Mandatory=$false)]
-    [string]$Config = "Debug",
-
-    [Parameter(Mandatory = $false)]
-    [ValidateSet("x64", "arm64")]
-    [string]$Arch = "x64",
-
     [Parameter(Mandatory = $false)]
     [switch]$IgnoreEbpf = $false
 )
 
 Set-StrictMode -Version 'Latest'
-$ErrorActionPreference = 'Stop'
+$PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
 
 # Important paths.
 $RootDir = Split-Path $PSScriptRoot -Parent
@@ -40,7 +32,7 @@ function Check-Driver($Driver) {
 function Check-And-Remove-Driver($Driver, $Component) {
     if (Check-Driver $Driver) {
         Write-Host "Detected $Driver is loaded. Uninstalling $Component..."
-        & $RootDir\tools\setup.ps1 -Uninstall $Component -Config $Config -Arch $Arch
+        & $RootDir\tools\setup.ps1 -Uninstall $Component
 
         # Update cached driverquery output.
         $AllDrivers = driverquery /v /fo list

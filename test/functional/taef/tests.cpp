@@ -396,10 +396,6 @@ public:
         GenericRxFromTxInspect(AF_INET6);
     }
 
-    TEST_METHOD(SecurityAdjustDeviceAcl) {
-        ::SecurityAdjustDeviceAcl();
-    }
-
     TEST_METHOD(GenericRxEbpfAttach) {
         ::GenericRxEbpfAttach();
     }
@@ -464,10 +460,6 @@ public:
         ::OffloadRssCapabilities();
     }
 
-    TEST_METHOD(OffloadRssReset) {
-        ::OffloadRssReset();
-    }
-
     TEST_METHOD(FnLwfRx) {
         ::FnLwfRx();
     }
@@ -486,21 +478,5 @@ public:
 
     TEST_METHOD(GenericXskQueryAffinity) {
         ::GenericXskQueryAffinity();
-    }
-
-    TEST_METHOD(OffloadQeoConnection) {
-        ::OffloadQeoConnection();
-    }
-
-    TEST_METHOD(OffloadQeoRevertInterfaceRemoval) {
-        ::OffloadQeoRevert(RevertReasonInterfaceRemoval);
-    }
-
-    TEST_METHOD(OffloadQeoRevertHandleClosure) {
-        ::OffloadQeoRevert(RevertReasonHandleClosure);
-    }
-
-    TEST_METHOD(OffloadQeoOidFailure) {
-        ::OffloadQeoOidFailure();
     }
 };

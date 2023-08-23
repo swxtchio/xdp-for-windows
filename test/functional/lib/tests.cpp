@@ -6,11 +6,10 @@
 #pragma warning(disable:26495)  // Always initialize a variable
 #pragma warning(disable:26812)  // The enum type '_XDP_MODE' is unscoped.
 
-#define _CRT_RAND_S
-#include <cstdlib>
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <future>
 #include <initializer_list>
 #include <memory>
@@ -26,8 +25,6 @@
 #include <iphlpapi.h>
 #include <ws2tcpip.h>
 #include <mstcpip.h>
-#include <lm.h>
-#include <sddl.h>
 
 #if _MSCVER < 1930
 //
@@ -47,13 +44,11 @@
 
 #include <afxdp_helper.h>
 #include <xdpapi.h>
-#include <xdpapi_experimental.h>
 #include <pkthlp.h>
 #include <xdpfnmpapi.h>
 #include <xdpfnlwfapi.h>
 #include <xdpndisuser.h>
 #include <fntrace.h>
-#include <qeo_ndis.h>
 
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
@@ -76,8 +71,6 @@
 #define DEFAULT_UMEM_CHUNK_SIZE 4096
 #define DEFAULT_UMEM_HEADROOM 0
 #define DEFAULT_RING_SIZE (DEFAULT_UMEM_SIZE / DEFAULT_UMEM_CHUNK_SIZE)
-
-#define DEFAULT_XDP_SDDL "D:P(A;;GA;;;SY)(A;;GA;;;BA)"
 
 static CONST XDP_HOOK_ID XdpInspectRxL2 =
 {
@@ -103,7 +96,7 @@ static CONST XDP_HOOK_ID XdpInspectTxL2 =
 //
 // The expected maximum time needed for a network adapter to restart.
 //
-#define MP_RESTART_TIMEOUT std::chrono::seconds(15)
+#define MP_RESTART_TIMEOUT std::chrono::seconds(10)
 
 //
 // Interval between polling attempts.
@@ -159,7 +152,6 @@ static RX_TX_TESTCASE RxTxTestCases[] = {
 };
 
 static CONST CHAR *PowershellPrefix;
-static RTL_OSVERSIONINFOW OsVersionInfo;
 
 //
 // Helper functions.
@@ -173,30 +165,9 @@ WaitForNdisDatapath(
     _In_ const TestInterface& If
     );
 
-static
-BOOLEAN
-TryWaitForNdisDatapath(
-    _In_ const TestInterface& If
-    );
-
-static
-INT
-InvokeSystem(
-    _In_z_ const CHAR *Command
-    )
-{
-    INT Result;
-
-    TraceVerbose("system(%s)", Command);
-    Result = system(Command);
-    TraceVerbose("system(%s) returned %u", Command, Result);
-
-    return Result;
-}
-
 typedef NTSTATUS (WINAPI* RTL_GET_VERSION_FN)(PRTL_OSVERSIONINFOW);
 
-VOID
+RTL_OSVERSIONINFOW
 GetOSVersion(
     )
 {
@@ -206,30 +177,22 @@ GetOSVersion(
     RTL_GET_VERSION_FN RtlGetVersion = (RTL_GET_VERSION_FN)GetProcAddress(Module, "RtlGetVersion");
     TEST_TRUE(RtlGetVersion != NULL);
 
-    OsVersionInfo.dwOSVersionInfoSize = sizeof(OsVersionInfo);
-    TEST_EQUAL(STATUS_SUCCESS, RtlGetVersion(&OsVersionInfo));
+    RTL_OSVERSIONINFOW OsVersion = { 0 };
+    OsVersion.dwOSVersionInfoSize = sizeof(OsVersion);
+    TEST_EQUAL(STATUS_SUCCESS, RtlGetVersion(&OsVersion));
+
+    return OsVersion;
 }
 
 BOOLEAN
-OsVersionIsFeOrLater()
+OsVersionIsFeOrLater(
+    _In_ const RTL_OSVERSIONINFOW *OsVersion
+    )
 {
     return
-        (OsVersionInfo.dwMajorVersion > 10 || (OsVersionInfo.dwMajorVersion == 10 &&
-        (OsVersionInfo.dwMinorVersion > 0 || (OsVersionInfo.dwMinorVersion == 0 &&
-        (OsVersionInfo.dwBuildNumber >= 20100)))));
-}
-
-BOOLEAN
-OsVersionIsGaOrLater()
-{
-    //
-    // N.B. The version number here is an estimate. The actual version number
-    // should be set once [Ga] releases.
-    //
-    return
-        (OsVersionInfo.dwMajorVersion > 10 || (OsVersionInfo.dwMajorVersion == 10 &&
-        (OsVersionInfo.dwMinorVersion > 0 || (OsVersionInfo.dwMinorVersion == 0 &&
-        (OsVersionInfo.dwBuildNumber >= 25892)))));
+        (OsVersion->dwMajorVersion > 10 || (OsVersion->dwMajorVersion == 10 &&
+        (OsVersion->dwMinorVersion > 0 || (OsVersion->dwMinorVersion == 0 &&
+        (OsVersion->dwBuildNumber >= 20100)))));
 }
 
 UINT32
@@ -317,12 +280,6 @@ public:
         return T((ElapsedQpc * T::period::den) / T::period::num / _FrequencyQpc.QuadPart);
     }
 
-    T
-    Remaining()
-    {
-        return std::max(T(0), _TimeoutInterval - Elapsed());
-    }
-
     bool
     IsExpired()
     {
@@ -361,7 +318,7 @@ class TestInterface {
 private:
     CONST CHAR *_IfDesc;
     mutable UINT32 _IfIndex;
-    mutable UCHAR _HwAddress[sizeof(ETHERNET_ADDRESS)]{ 0 };
+    mutable UCHAR _HwAddress[ETHERNET_MAC_SIZE]{ 0 };
     IN_ADDR _Ipv4Address;
     IN6_ADDR _Ipv6Address;
 
@@ -488,32 +445,17 @@ public:
         Ipv6Address->u.Byte[sizeof(*Ipv6Address) - 1]++;
     }
 
-    BOOLEAN
-    TryRestart(BOOLEAN WaitForUp = TRUE) const
-    {
-        CHAR CmdBuff[256];
-        INT ExitCode;
-        RtlZeroMemory(CmdBuff, sizeof(CmdBuff));
-        sprintf_s(CmdBuff, "%s /c Restart-NetAdapter -ifDesc \"%s\"", PowershellPrefix, _IfDesc);
-        ExitCode = InvokeSystem(CmdBuff);
-
-        if (ExitCode != 0) {
-            TraceError("ExitCode=%u", ExitCode);
-            return FALSE;
-        }
-
-        if (WaitForUp && !TryWaitForNdisDatapath(*this)) {
-            TraceError("TryWaitForNdisDatapath=FALSE");
-            return FALSE;
-        }
-
-        return TRUE;
-    }
-
     VOID
     Restart(BOOLEAN WaitForUp = TRUE) const
     {
-        TEST_TRUE(TryRestart(WaitForUp));
+        CHAR CmdBuff[256];
+        RtlZeroMemory(CmdBuff, sizeof(CmdBuff));
+        sprintf_s(CmdBuff, "%s /c Restart-NetAdapter -ifDesc \"%s\"", PowershellPrefix, _IfDesc);
+        TEST_EQUAL(0, system(CmdBuff));
+
+        if (WaitForUp) {
+            WaitForNdisDatapath(*this);
+        }
     }
 
     VOID
@@ -522,32 +464,8 @@ public:
         CHAR CmdBuff[256];
         RtlZeroMemory(CmdBuff, sizeof(CmdBuff));
         sprintf_s(CmdBuff, "%s /c Reset-NetAdapterAdvancedProperty -ifDesc \"%s\" -DisplayName * -NoRestart", PowershellPrefix, _IfDesc);
-        TEST_EQUAL(0, InvokeSystem(CmdBuff));
+        TEST_EQUAL(0, system(CmdBuff));
         Restart();
-    }
-
-    HRESULT
-    TryUnbindXdp() const
-    {
-        CHAR CmdBuff[256];
-        RtlZeroMemory(CmdBuff, sizeof(CmdBuff));
-        sprintf_s(
-            CmdBuff,
-            "%s /c \"(Get-NetAdapter -ifDesc '%s') | Disable-NetAdapterBinding -ComponentID ms_xdp",
-            PowershellPrefix, _IfDesc);
-        return HRESULT_FROM_WIN32(InvokeSystem(CmdBuff));
-    }
-
-    HRESULT
-    TryRebindXdp() const
-    {
-        CHAR CmdBuff[256];
-        RtlZeroMemory(CmdBuff, sizeof(CmdBuff));
-        sprintf_s(
-            CmdBuff,
-            "%s /c \"(Get-NetAdapter -ifDesc '%s') | Enable-NetAdapterBinding -ComponentID ms_xdp",
-            PowershellPrefix, _IfDesc);
-        return HRESULT_FROM_WIN32(InvokeSystem(CmdBuff));
     }
 };
 
@@ -624,41 +542,9 @@ TryStopService(
 
 static
 HRESULT
-TryRestartService(
-    _In_z_ const CHAR *ServiceName
-    )
-{
-    HRESULT Result;
-
-    Result = TryStopService(ServiceName);
-    if (FAILED(Result)) {
-        return Result;
-    }
-
-    return TryStartService(ServiceName);
-}
-
-static
-VOID
-SetDeviceSddl(
-    _In_z_ const CHAR *Sddl
-    )
-{
-    CHAR CmdBuff[256];
-    CHAR Path[MAX_PATH];
-    RtlZeroMemory(CmdBuff, sizeof(CmdBuff));
-
-    TEST_HRESULT(GetCurrentBinaryPath(Path, sizeof(Path)));
-
-    sprintf_s(CmdBuff, "%s\\xdpcfg.exe SetDeviceSddl \"%s\"", Path, Sddl);
-    TEST_EQUAL(0, InvokeSystem(CmdBuff));
-}
-
-static
-HRESULT
 TryOpenApi(
     _Out_ unique_xdp_api &XdpApiTable,
-    _In_ UINT32 Version = XDP_API_VERSION_1
+    _In_ UINT32 Version = XDP_VERSION_PRERELEASE
     )
 {
     return XdpOpenApi(Version, wil::out_param(XdpApiTable));
@@ -667,7 +553,7 @@ TryOpenApi(
 static
 unique_xdp_api
 OpenApi(
-    _In_ UINT32 Version = XDP_API_VERSION_1
+    _In_ UINT32 Version = XDP_VERSION_PRERELEASE
     )
 {
     unique_xdp_api XdpApiTable;
@@ -676,20 +562,11 @@ OpenApi(
 }
 
 static
-HRESULT
-TryCreateSocket(
-    _Inout_ wil::unique_handle &Socket
-    )
-{
-    return XdpApi->XskCreate(&Socket);
-}
-
-static
 wil::unique_handle
 CreateSocket()
 {
     wil::unique_handle Socket;
-    TEST_HRESULT(TryCreateSocket(Socket));
+    TEST_HRESULT(XdpApi->XskCreate(&Socket));
     return Socket;
 }
 
@@ -713,10 +590,10 @@ InitUmem(
     VOID *UmemBuffer
     )
 {
-    UmemRegistration->TotalSize = DEFAULT_UMEM_SIZE;
-    UmemRegistration->ChunkSize = DEFAULT_UMEM_CHUNK_SIZE;
-    UmemRegistration->Headroom = DEFAULT_UMEM_HEADROOM;
-    UmemRegistration->Address = UmemBuffer;
+    UmemRegistration->totalSize = DEFAULT_UMEM_SIZE;
+    UmemRegistration->chunkSize = DEFAULT_UMEM_CHUNK_SIZE;
+    UmemRegistration->headroom = DEFAULT_UMEM_HEADROOM;
+    UmemRegistration->address = UmemBuffer;
 }
 
 static
@@ -800,7 +677,7 @@ SetFillRing(
 
     SetSockopt(Socket, XSK_SOCKOPT_RX_FILL_RING_SIZE, &RingSize, sizeof(RingSize));
     GetRingInfo(Socket, &InfoSet);
-    TEST_EQUAL(RingSize, InfoSet.Fill.Size);
+    TEST_EQUAL(RingSize, InfoSet.fill.size);
 }
 
 static
@@ -814,7 +691,7 @@ SetCompletionRing(
 
     SetSockopt(Socket, XSK_SOCKOPT_TX_COMPLETION_RING_SIZE, &RingSize, sizeof(RingSize));
     GetRingInfo(Socket, &InfoSet);
-    TEST_EQUAL(RingSize, InfoSet.Completion.Size);
+    TEST_EQUAL(RingSize, InfoSet.completion.size);
 }
 
 static
@@ -828,7 +705,7 @@ SetRxRing(
 
     SetSockopt(Socket, XSK_SOCKOPT_RX_RING_SIZE, &RingSize, sizeof(RingSize));
     GetRingInfo(Socket, &InfoSet);
-    TEST_EQUAL(RingSize, InfoSet.Rx.Size);
+    TEST_EQUAL(RingSize, InfoSet.rx.size);
 }
 
 static
@@ -842,7 +719,7 @@ SetTxRing(
 
     SetSockopt(Socket, XSK_SOCKOPT_TX_RING_SIZE, &RingSize, sizeof(RingSize));
     GetRingInfo(Socket, &InfoSet);
-    TEST_EQUAL(RingSize, InfoSet.Tx.Size);
+    TEST_EQUAL(RingSize, InfoSet.tx.size);
 }
 
 static
@@ -949,14 +826,7 @@ TryRssGetCapabilities(
     _Inout_ UINT32 *RssCapabilitiesSize
     )
 {
-    XDP_RSS_GET_CAPABILITIES_FN *XdpRssGetCapabilities =
-        (XDP_RSS_GET_CAPABILITIES_FN *)XdpApi->XdpGetRoutine(XDP_RSS_GET_CAPABILITIES_FN_NAME);
-
-    if (XdpRssGetCapabilities == NULL) {
-        return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
-    }
-
-    return XdpRssGetCapabilities(InterfaceHandle, RssCapabilities, RssCapabilitiesSize);
+    return XdpApi->XdpRssGetCapabilities(InterfaceHandle, RssCapabilities, RssCapabilitiesSize);
 }
 
 static
@@ -978,13 +848,7 @@ TryRssSet(
     _In_ UINT32 RssConfigurationSize
     )
 {
-    XDP_RSS_SET_FN *XdpRssSet = (XDP_RSS_SET_FN *)XdpApi->XdpGetRoutine(XDP_RSS_SET_FN_NAME);
-
-    if (XdpRssSet == NULL) {
-        return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
-    }
-
-    return XdpRssSet(InterfaceHandle, RssConfiguration, RssConfigurationSize);
+    return XdpApi->XdpRssSet(InterfaceHandle, RssConfiguration, RssConfigurationSize);
 }
 
 static
@@ -1006,13 +870,7 @@ TryRssGet(
     _Inout_ UINT32 *RssConfigurationSize
     )
 {
-    XDP_RSS_GET_FN *XdpRssGet = (XDP_RSS_GET_FN *)XdpApi->XdpGetRoutine(XDP_RSS_GET_FN_NAME);
-
-    if (XdpRssGet == NULL) {
-        return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
-    }
-
-    return XdpRssGet(InterfaceHandle, RssConfiguration, RssConfigurationSize);
+    return XdpApi->XdpRssGet(InterfaceHandle, RssConfiguration, RssConfigurationSize);
 }
 
 static
@@ -1028,23 +886,6 @@ RssGet(
 
 static
 HRESULT
-TryQeoSet(
-    _In_ HANDLE InterfaceHandle,
-    _In_ XDP_QUIC_CONNECTION *QuicConnections,
-    _In_ UINT32 QuicConnectionsSize
-    )
-{
-    XDP_QEO_SET_FN *XdpQeoSet = (XDP_QEO_SET_FN *)XdpApi->XdpGetRoutine(XDP_QEO_SET_FN_NAME);
-
-    if (XdpQeoSet == NULL) {
-        return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
-    }
-
-    return XdpQeoSet(InterfaceHandle, QuicConnections, QuicConnectionsSize);
-}
-
-static
-HRESULT
 TryCreateXdpProg(
     _Out_ wil::unique_handle &ProgramHandle,
     _In_ UINT32 IfIndex,
@@ -1053,7 +894,7 @@ TryCreateXdpProg(
     _In_ XDP_MODE XdpMode,
     _In_ XDP_RULE *Rules,
     _In_ UINT32 RuleCount,
-    _In_ XDP_CREATE_PROGRAM_FLAGS Flags = XDP_CREATE_PROGRAM_FLAG_NONE
+    _In_ UINT32 Flags = 0
     )
 {
     ASSERT(Flags & (XDP_CREATE_PROGRAM_FLAG_GENERIC | XDP_CREATE_PROGRAM_FLAG_NATIVE) == 0);
@@ -1077,7 +918,7 @@ CreateXdpProg(
     _In_ XDP_MODE XdpMode,
     _In_ XDP_RULE *Rules,
     _In_ UINT32 RuleCount,
-    _In_ XDP_CREATE_PROGRAM_FLAGS Flags = XDP_CREATE_PROGRAM_FLAG_NONE
+    _In_ UINT32 Flags = 0
     )
 {
     wil::unique_handle ProgramHandle;
@@ -1153,22 +994,22 @@ XskSetupPostBind(
     XSK_RING_INFO_SET InfoSet;
 
     GetRingInfo(Socket->Handle.get(), &InfoSet);
-    XskRingInitialize(&Socket->Rings.Fill, &InfoSet.Fill);
-    XskRingInitialize(&Socket->Rings.Completion, &InfoSet.Completion);
+    XskRingInitialize(&Socket->Rings.Fill, &InfoSet.fill);
+    XskRingInitialize(&Socket->Rings.Completion, &InfoSet.completion);
 
     if (Rx) {
-        XskRingInitialize(&Socket->Rings.Rx, &InfoSet.Rx);
+        XskRingInitialize(&Socket->Rings.Rx, &InfoSet.rx);
     }
 
     if (Tx) {
-        XskRingInitialize(&Socket->Rings.Tx, &InfoSet.Tx);
+        XskRingInitialize(&Socket->Rings.Tx, &InfoSet.tx);
     }
 
-    UINT64 BufferCount = Socket->Umem.Reg.TotalSize / Socket->Umem.Reg.ChunkSize;
+    UINT64 BufferCount = Socket->Umem.Reg.totalSize / Socket->Umem.Reg.chunkSize;
     UINT64 Offset = 0;
     while (BufferCount-- > 0) {
         Socket->FreeDescriptors.push(Offset);
-        Offset += Socket->Umem.Reg.ChunkSize;
+        Offset += Socket->Umem.Reg.chunkSize;
     }
 }
 
@@ -1295,7 +1136,7 @@ SocketGetAndFreeRxDesc(
     )
 {
     XSK_BUFFER_DESCRIPTOR * RxDesc = SocketGetRxDesc(Socket, Index);
-    Socket->FreeDescriptors.push(RxDesc->Address.BaseAddress);
+    Socket->FreeDescriptors.push(XskDescriptorGetAddress(RxDesc->address));
     return RxDesc;
 }
 
@@ -1360,21 +1201,6 @@ SocketProducerCheckNeedPoke(
     }
 
     TEST_EQUAL(ExpectedState, XskRingProducerNeedPoke(Ring));
-}
-
-static
-VOID
-InitializeOidKey(
-    _Out_ OID_KEY *Key,
-    _In_ NDIS_OID Oid,
-    _In_ NDIS_REQUEST_TYPE RequestType,
-    _In_opt_ OID_REQUEST_INTERFACE RequestInterface = OID_REQUEST_INTERFACE_REGULAR
-    )
-{
-    RtlZeroMemory(Key, sizeof(*Key));
-    Key->Oid = Oid;
-    Key->RequestType = RequestType;
-    Key->RequestInterface = RequestInterface;
 }
 
 static
@@ -1937,20 +1763,18 @@ MpOidGetRequest(
     return FnMpOidGetRequest(Handle.get(), Key, InformationBufferLength, InformationBuffer);
 }
 
-template<typename T=decltype(TEST_TIMEOUT_ASYNC)>
 static
 unique_malloc_ptr<VOID>
 MpOidAllocateAndGetRequest(
     _In_ const wil::unique_handle& Handle,
     _In_ OID_KEY Key,
-    _Out_ UINT32 *InformationBufferLength,
-    _In_opt_ T Timeout = TEST_TIMEOUT_ASYNC
+    _Out_ UINT32 *InformationBufferLength
     )
 {
     unique_malloc_ptr<VOID> InformationBuffer;
     UINT32 Length = 0;
     HRESULT Result;
-    Stopwatch<T> Watchdog(Timeout);
+    Stopwatch<std::chrono::milliseconds> Watchdog(TEST_TIMEOUT_ASYNC);
 
     //
     // Poll FNMP for an OID: the driver doesn't support overlapped IO.
@@ -1971,21 +1795,6 @@ MpOidAllocateAndGetRequest(
 
     *InformationBufferLength = Length;
     return InformationBuffer;
-}
-
-static
-HRESULT
-MpOidCompleteRequest(
-    _In_ const wil::unique_handle& Handle,
-    _In_ OID_KEY Key,
-    _In_ NDIS_STATUS Status,
-    _In_opt_ const VOID *InformationBuffer,
-    _In_ UINT32 InformationBufferLength
-    )
-{
-    return
-        FnMpOidCompleteRequest(
-            Handle.get(), Key, Status, InformationBuffer, InformationBufferLength);
 }
 
 static
@@ -2043,7 +1852,7 @@ CreateTcpSocket(
     //
     WaitForWfpQuarantine(*If);
 
-    wil::unique_socket Socket(socket(Af, SOCK_STREAM, IPPROTO_TCP));
+    wil::unique_socket Socket(socket(Af, SOCK_STREAM,IPPROTO_TCP));
     TEST_NOT_NULL(Socket.get());
 
     SOCKADDR_INET Address = {0};
@@ -2112,34 +1921,15 @@ CreateTcpSocket(
     TEST_HRESULT(MpRxIndicateFrame(GenericMp, &Frame));
 
     //
-    // Verify the SYN+ACK has been redirected to XSK, filtering out other
-    // TCP connections using the same remote port.
+    // Verify the SYN+ACK has been redirected to XSK.
     //
-
+    UINT32 ConsumerIndex = SocketConsumerReserve(&Xsk.Rings.Rx, 1, std::chrono::milliseconds(5000));
+    TEST_EQUAL(1, XskRingConsumerReserve(&Xsk.Rings.Rx, MAXUINT32, &ConsumerIndex));
+    auto RxDesc = SocketGetAndFreeRxDesc(&Xsk, ConsumerIndex++);
     TCP_HDR *TcpHeaderParsed = NULL;
-    Stopwatch<std::chrono::seconds> Watchdog(std::chrono::seconds(5));
-    do {
-        UINT32 ConsumerIndex = SocketConsumerReserve(&Xsk.Rings.Rx, 1, Watchdog.Remaining());
-        TEST_EQUAL(1, XskRingConsumerReserve(&Xsk.Rings.Rx, MAXUINT32, &ConsumerIndex));
-        auto RxDesc = SocketGetAndFreeRxDesc(&Xsk, ConsumerIndex++);
-
-        TEST_TRUE(PktParseTcpFrame(
-            Xsk.Umem.Buffer.get() + RxDesc->Address.BaseAddress + RxDesc->Address.Offset,
-            RxDesc->Length, &TcpHeaderParsed, NULL, 0));
-
-        if (*LocalPort == TcpHeaderParsed->th_sport) {
-            break;
-        }
-
-        XskRingConsumerRelease(&Xsk.Rings.Rx, 1);
-        SocketProduceRxFill(&Xsk, 1);
-        TcpHeaderParsed = NULL;
-    } while (!Watchdog.IsExpired());
-
-    TEST_NOT_NULL(TcpHeaderParsed);
-    TEST_EQUAL(*LocalPort, TcpHeaderParsed->th_sport);
-    TEST_EQUAL(TH_SYN | TH_ACK, TcpHeaderParsed->th_flags & (TH_SYN | TH_ACK | TH_RST | TH_FIN));
-
+    TEST_TRUE(PktParseTcpFrame(
+        Xsk.Umem.Buffer.get() + XskDescriptorGetAddress(RxDesc->address) + XskDescriptorGetOffset(RxDesc->address),
+        RxDesc->length, &TcpHeaderParsed, NULL, 0));
     //
     // Construct and inject the ACK for SYN+ACK.
     //
@@ -2150,28 +1940,8 @@ CreateTcpSocket(
             &RemoteHw, Af, &LocalIp, &RemoteIp, *LocalPort, RemotePort));
     RxInitializeFrame(&Frame, If->GetQueueId(), TcpFrame, TcpFrameLength);
     TEST_HRESULT(MpRxIndicateFrame(GenericMp, &Frame));
-
-    //
-    // Start a blocking accept and ensure that if the accept fails to complete
-    // within the timeout, the listening socket gets closed, which will cancel
-    // the accept request.
-    //
-    auto AsyncThread = std::async(
-        std::launch::async,
-        [&] {
-            return wil::unique_socket(accept(Socket.get(), NULL, 0));
-        }
-    );
-    auto CloseListener = wil::scope_exit([&]
-    {
-        Socket.reset();
-    });
-
-    TEST_EQUAL(AsyncThread.wait_for(TEST_TIMEOUT_ASYNC), std::future_status::ready);
-
-    wil::unique_socket AcceptedSocket = std::move(AsyncThread.get());
+    wil::unique_socket AcceptedSocket(accept(Socket.get(), NULL, 0));
     TEST_NOT_NULL(AcceptedSocket.get());
-
     *AckNum = AckNumForSynAck;
     return AcceptedSocket;
 }
@@ -2229,8 +1999,8 @@ WaitForWfpQuarantine(
 }
 
 static
-BOOLEAN
-TryWaitForNdisDatapath(
+VOID
+WaitForNdisDatapath(
     _In_ const TestInterface& If
     )
 {
@@ -2258,32 +2028,14 @@ TryWaitForNdisDatapath(
             CmdBuff,
             "%s /c exit (Get-NetAdapter -InterfaceDescription \"%s\").Status -eq \"Up\"",
             PowershellPrefix, If.GetIfDesc());
-        AdapterUp = !!InvokeSystem(CmdBuff);
+        AdapterUp = !!system(CmdBuff);
 
         wil::unique_handle FnLwf = LwfOpenDefault(If.GetIfIndex());
         LwfUp = LwfIsDatapathActive(FnLwf);
-    } while (Sleep(TEST_TIMEOUT_ASYNC_MS / 10), !(AdapterUp && LwfUp) && !Watchdog.IsExpired());
+    } while (Sleep(POLL_INTERVAL_MS), !(AdapterUp && LwfUp) && !Watchdog.IsExpired());
 
-    if (!AdapterUp) {
-        TraceError("AdapterUp=FALSE");
-        return FALSE;
-    }
-
-    if (!LwfUp) {
-        TraceError("LwfUp=FALSE");
-        return FALSE;
-    }
-
-    return TRUE;
-}
-
-static
-VOID
-WaitForNdisDatapath(
-    _In_ const TestInterface& If
-    )
-{
-    TEST_TRUE(TryWaitForNdisDatapath(If));
+    TEST_TRUE(AdapterUp);
+    TEST_TRUE(LwfUp);
 }
 
 static
@@ -2310,11 +2062,10 @@ TestSetup()
 {
     WSADATA WsaData;
     WPP_INIT_TRACING(NULL);
-    GetOSVersion();
-    PowershellPrefix = GetPowershellPrefix();
     XdpApi = OpenApi();
+    PowershellPrefix = GetPowershellPrefix();
     TEST_EQUAL(0, WSAStartup(MAKEWORD(2,2), &WsaData));
-    TEST_EQUAL(0, InvokeSystem("netsh advfirewall firewall add rule name=xdpfntest dir=in action=allow protocol=any remoteip=any localip=any"));
+    TEST_EQUAL(0, system("netsh advfirewall firewall add rule name=xdpfntest dir=in action=allow protocol=any remoteip=any localip=any"));
     WaitForWfpQuarantine(FnMpIf);
     WaitForNdisDatapath(FnMpIf);
     WaitForWfpQuarantine(FnMp1QIf);
@@ -2325,7 +2076,7 @@ TestSetup()
 bool
 TestCleanup()
 {
-    TEST_EQUAL(0, InvokeSystem("netsh advfirewall firewall delete rule name=xdpfntest"));
+    TEST_EQUAL(0, system("netsh advfirewall firewall delete rule name=xdpfntest"));
     TEST_EQUAL(0, WSACleanup());
     XdpApi.reset();
     WPP_CLEANUP();
@@ -2360,7 +2111,7 @@ OpenApiTest()
     XdpCloseApi(XdpApiTable.get());
     XdpApiTable.release();
 
-    TEST_FALSE(SUCCEEDED(TryOpenApi(XdpApiTable, XDP_API_VERSION_1 + 1)));
+    TEST_FALSE(SUCCEEDED(TryOpenApi(XdpApiTable, XDP_VERSION_PRERELEASE + 1)));
 }
 
 VOID
@@ -2369,10 +2120,10 @@ LoadApiTest()
     XDP_LOAD_API_CONTEXT XdpLoadApiContext;
     const XDP_API_TABLE *XdpApiTable;
 
-    TEST_HRESULT(XdpLoadApi(XDP_API_VERSION_1, &XdpLoadApiContext, &XdpApiTable));
+    TEST_HRESULT(XdpLoadApi(XDP_VERSION_PRERELEASE, &XdpLoadApiContext, &XdpApiTable));
     XdpUnloadApi(XdpLoadApiContext, XdpApiTable);
 
-    TEST_FALSE(SUCCEEDED(XdpLoadApi(XDP_API_VERSION_1 + 1, &XdpLoadApiContext, &XdpApiTable)));
+    TEST_FALSE(SUCCEEDED(XdpLoadApi(XDP_VERSION_PRERELEASE + 1, &XdpLoadApiContext, &XdpApiTable)));
 }
 
 static
@@ -2395,8 +2146,6 @@ BindingTest(
                 Stopwatch<std::chrono::milliseconds> Timer(MP_RESTART_TIMEOUT);
                 If.Restart(FALSE);
                 TEST_FALSE(Timer.IsExpired());
-
-                TEST_TRUE(TryWaitForNdisDatapath(If));
             }
         }
 
@@ -2411,8 +2160,6 @@ BindingTest(
                 Stopwatch<std::chrono::milliseconds> Timer(MP_RESTART_TIMEOUT);
                 If.Restart(FALSE);
                 TEST_FALSE(Timer.IsExpired());
-
-                TEST_TRUE(TryWaitForNdisDatapath(If));
             }
 
             Socket.RxProgram.reset();
@@ -2433,6 +2180,7 @@ BindingTest(
 
     if (RestartAdapter) {
         WaitForWfpQuarantine(If);
+        WaitForNdisDatapath(If);
     }
 }
 
@@ -2506,10 +2254,11 @@ GenericRxSingleFrame()
     //
     TEST_EQUAL(1, XskRingConsumerReserve(&Socket.Rings.Rx, MAXUINT32, &ConsumerIndex));
     auto RxDesc = SocketGetAndFreeRxDesc(&Socket, ConsumerIndex);
-    TEST_EQUAL(Buffer.DataLength, RxDesc->Length);
+    TEST_EQUAL(Buffer.DataLength, RxDesc->length);
     TEST_TRUE(
         RtlEqualMemory(
-            Socket.Umem.Buffer.get() + RxDesc->Address.BaseAddress + RxDesc->Address.Offset,
+            Socket.Umem.Buffer.get() +
+                XskDescriptorGetAddress(RxDesc->address) + XskDescriptorGetOffset(RxDesc->address),
             Buffer.VirtualAddress + Buffer.DataOffset,
             Buffer.DataLength));
 }
@@ -2548,10 +2297,11 @@ GenericRxBackfillAndTrailer()
     //
     TEST_EQUAL(1, XskRingConsumerReserve(&Socket.Rings.Rx, MAXUINT32, &ConsumerIndex));
     auto RxDesc = SocketGetAndFreeRxDesc(&Socket, ConsumerIndex);
-    TEST_EQUAL(Buffer.DataLength, RxDesc->Length);
+    TEST_EQUAL(Buffer.DataLength, RxDesc->length);
     TEST_TRUE(
         RtlEqualMemory(
-            Socket.Umem.Buffer.get() + RxDesc->Address.BaseAddress + RxDesc->Address.Offset,
+            Socket.Umem.Buffer.get() +
+                XskDescriptorGetAddress(RxDesc->address) + XskDescriptorGetOffset(RxDesc->address),
             Buffer.VirtualAddress + Buffer.DataOffset,
             Buffer.DataLength));
 }
@@ -2635,10 +2385,11 @@ GenericRxAllQueueRedirect(
     ConsumerIndex = SocketConsumerReserve(&Xsk.Rings.Rx, 1);
     TEST_EQUAL(1, XskRingConsumerReserve(&Xsk.Rings.Rx, MAXUINT32, &ConsumerIndex));
     auto RxDesc = SocketGetAndFreeRxDesc(&Xsk, ConsumerIndex);
-    TEST_EQUAL(PacketBufferLength, RxDesc->Length);
+    TEST_EQUAL(PacketBufferLength, RxDesc->length);
     TEST_TRUE(
         RtlEqualMemory(
-            Xsk.Umem.Buffer.get() + RxDesc->Address.BaseAddress + RxDesc->Address.Offset,
+            Xsk.Umem.Buffer.get() +
+                XskDescriptorGetAddress(RxDesc->address) + XskDescriptorGetOffset(RxDesc->address),
             PacketBuffer,
             PacketBufferLength));
 }
@@ -2721,10 +2472,11 @@ GenericRxTcpControl(
     ConsumerIndex = SocketConsumerReserve(&Xsk.Rings.Rx, 1);
     TEST_EQUAL(1, XskRingConsumerReserve(&Xsk.Rings.Rx, MAXUINT32, &ConsumerIndex));
     auto RxDesc = SocketGetAndFreeRxDesc(&Xsk, ConsumerIndex);
-    TEST_EQUAL(PacketBufferLength, RxDesc->Length);
+    TEST_EQUAL(PacketBufferLength, RxDesc->length);
     TEST_TRUE(
         RtlEqualMemory(
-            Xsk.Umem.Buffer.get() + RxDesc->Address.BaseAddress + RxDesc->Address.Offset,
+            Xsk.Umem.Buffer.get() +
+                XskDescriptorGetAddress(RxDesc->address) + XskDescriptorGetOffset(RxDesc->address),
             PacketBuffer,
             PacketBufferLength));
     XskRingConsumerRelease(&Xsk.Rings.Rx, 1);
@@ -2743,10 +2495,11 @@ GenericRxTcpControl(
     ConsumerIndex = SocketConsumerReserve(&Xsk.Rings.Rx, 1);
     TEST_EQUAL(1, XskRingConsumerReserve(&Xsk.Rings.Rx, MAXUINT32, &ConsumerIndex));
     RxDesc = SocketGetAndFreeRxDesc(&Xsk, ConsumerIndex);
-    TEST_EQUAL(PacketBufferLength, RxDesc->Length);
+    TEST_EQUAL(PacketBufferLength, RxDesc->length);
     TEST_TRUE(
         RtlEqualMemory(
-            Xsk.Umem.Buffer.get() + RxDesc->Address.BaseAddress + RxDesc->Address.Offset,
+            Xsk.Umem.Buffer.get() +
+                XskDescriptorGetAddress(RxDesc->address) + XskDescriptorGetOffset(RxDesc->address),
             PacketBuffer,
             PacketBufferLength));
     XskRingConsumerRelease(&Xsk.Rings.Rx, 1);
@@ -2765,10 +2518,11 @@ GenericRxTcpControl(
     ConsumerIndex = SocketConsumerReserve(&Xsk.Rings.Rx, 1);
     TEST_EQUAL(1, XskRingConsumerReserve(&Xsk.Rings.Rx, MAXUINT32, &ConsumerIndex));
     RxDesc = SocketGetAndFreeRxDesc(&Xsk, ConsumerIndex);
-    TEST_EQUAL(PacketBufferLength, RxDesc->Length);
+    TEST_EQUAL(PacketBufferLength, RxDesc->length);
     TEST_TRUE(
         RtlEqualMemory(
-            Xsk.Umem.Buffer.get() + RxDesc->Address.BaseAddress + RxDesc->Address.Offset,
+            Xsk.Umem.Buffer.get() +
+                XskDescriptorGetAddress(RxDesc->address) + XskDescriptorGetOffset(RxDesc->address),
             PacketBuffer,
             PacketBufferLength));
     XskRingConsumerRelease(&Xsk.Rings.Rx, 1);
@@ -2787,10 +2541,11 @@ GenericRxTcpControl(
     ConsumerIndex = SocketConsumerReserve(&Xsk.Rings.Rx, 1);
     TEST_EQUAL(1, XskRingConsumerReserve(&Xsk.Rings.Rx, MAXUINT32, &ConsumerIndex));
     RxDesc = SocketGetAndFreeRxDesc(&Xsk, ConsumerIndex);
-    TEST_EQUAL(PacketBufferLength, RxDesc->Length);
+    TEST_EQUAL(PacketBufferLength, RxDesc->length);
     TEST_TRUE(
         RtlEqualMemory(
-            Xsk.Umem.Buffer.get() + RxDesc->Address.BaseAddress + RxDesc->Address.Offset,
+            Xsk.Umem.Buffer.get() +
+                XskDescriptorGetAddress(RxDesc->address) + XskDescriptorGetOffset(RxDesc->address),
             PacketBuffer,
             PacketBufferLength));
     XskRingConsumerRelease(&Xsk.Rings.Rx, 1);
@@ -2809,10 +2564,11 @@ GenericRxTcpControl(
     ConsumerIndex = SocketConsumerReserve(&Xsk.Rings.Rx, 1);
     TEST_EQUAL(1, XskRingConsumerReserve(&Xsk.Rings.Rx, MAXUINT32, &ConsumerIndex));
     RxDesc = SocketGetAndFreeRxDesc(&Xsk, ConsumerIndex);
-    TEST_EQUAL(PacketBufferLength, RxDesc->Length);
+    TEST_EQUAL(PacketBufferLength, RxDesc->length);
     TEST_TRUE(
         RtlEqualMemory(
-            Xsk.Umem.Buffer.get() + RxDesc->Address.BaseAddress + RxDesc->Address.Offset,
+            Xsk.Umem.Buffer.get() +
+                XskDescriptorGetAddress(RxDesc->address) + XskDescriptorGetOffset(RxDesc->address),
             PacketBuffer,
             PacketBufferLength));
     XskRingConsumerRelease(&Xsk.Rings.Rx, 1);
@@ -2831,10 +2587,11 @@ GenericRxTcpControl(
     ConsumerIndex = SocketConsumerReserve(&Xsk.Rings.Rx, 1);
     TEST_EQUAL(1, XskRingConsumerReserve(&Xsk.Rings.Rx, MAXUINT32, &ConsumerIndex));
     RxDesc = SocketGetAndFreeRxDesc(&Xsk, ConsumerIndex);
-    TEST_EQUAL(PacketBufferLength, RxDesc->Length);
+    TEST_EQUAL(PacketBufferLength, RxDesc->length);
     TEST_TRUE(
         RtlEqualMemory(
-            Xsk.Umem.Buffer.get() + RxDesc->Address.BaseAddress + RxDesc->Address.Offset,
+            Xsk.Umem.Buffer.get() +
+                XskDescriptorGetAddress(RxDesc->address) + XskDescriptorGetOffset(RxDesc->address),
             PacketBuffer,
             PacketBufferLength));
     XskRingConsumerRelease(&Xsk.Rings.Rx, 1);
@@ -3402,10 +3159,11 @@ GenericRxLowResources()
 
     for (UINT32 Index = 0; Index < NumMatchFrames; Index++) {
         auto RxDesc = SocketGetAndFreeRxDesc(&Xsk, ConsumerIndex++);
-        TEST_EQUAL(UdpMatchFrameLength, RxDesc->Length);
+        TEST_EQUAL(UdpMatchFrameLength, RxDesc->length);
         TEST_TRUE(
             RtlEqualMemory(
-                Xsk.Umem.Buffer.get() + RxDesc->Address.BaseAddress + RxDesc->Address.Offset,
+                Xsk.Umem.Buffer.get() + XskDescriptorGetAddress(RxDesc->address) +
+                    XskDescriptorGetOffset(RxDesc->address),
                 UdpMatchFrame,
                 UdpMatchFrameLength));
     }
@@ -3492,10 +3250,11 @@ GenericRxMultiSocket()
         //
         TEST_EQUAL(1, XskRingConsumerReserve(&Socket.Rings.Rx, MAXUINT32, &ConsumerIndex));
         auto RxDesc = SocketGetAndFreeRxDesc(&Socket, ConsumerIndex);
-        TEST_EQUAL(Buffer.DataLength, RxDesc->Length);
+        TEST_EQUAL(Buffer.DataLength, RxDesc->length);
         TEST_TRUE(
             RtlEqualMemory(
-                Socket.Umem.Buffer.get() + RxDesc->Address.BaseAddress + RxDesc->Address.Offset,
+                Socket.Umem.Buffer.get() +
+                    XskDescriptorGetAddress(RxDesc->address) + XskDescriptorGetOffset(RxDesc->address),
                 Buffer.VirtualAddress + Buffer.DataOffset,
                 Buffer.DataLength));
     }
@@ -3583,10 +3342,11 @@ GenericRxMultiProgram()
 
             TEST_EQUAL(1, XskRingConsumerReserve(&Socket.Rings.Rx, MAXUINT32, &ConsumerIndex));
             auto RxDesc = SocketGetAndFreeRxDesc(&Socket, ConsumerIndex);
-            TEST_EQUAL(Buffer.DataLength, RxDesc->Length);
+            TEST_EQUAL(Buffer.DataLength, RxDesc->length);
             TEST_TRUE(
                 RtlEqualMemory(
-                    Socket.Umem.Buffer.get() + RxDesc->Address.BaseAddress + RxDesc->Address.Offset,
+                    Socket.Umem.Buffer.get() +
+                        XskDescriptorGetAddress(RxDesc->address) + XskDescriptorGetOffset(RxDesc->address),
                     Buffer.VirtualAddress + Buffer.DataOffset,
                     Buffer.DataLength));
         }
@@ -3619,7 +3379,7 @@ GenericRxUdpFragmentQuicShortHeader(
         If.GetRemoteIpv6Address(&RemoteIp.Ipv6);
     }
 
-    const UCHAR QuicShortHdrUdpPayload[XDP_QUIC_MAX_CID_LENGTH + 10] = { // 21 bytes is a full CID
+    const UCHAR QuicShortHdrUdpPayload[QUIC_MAX_CID_LENGTH + 10] = { // 21 bytes is a full CID
         0x00, // IsLongHeader
         0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // DestCid
         0x00 // The rest
@@ -4007,10 +3767,11 @@ GenericRxFragmentBuffer(
         TEST_EQUAL(1, XskRingConsumerReserve(&Xsk.Rings.Rx, MAXUINT32, &ConsumerIndex));
         auto RxDesc = SocketGetAndFreeRxDesc(&Xsk, ConsumerIndex);
 
-        TEST_EQUAL(ActualPacketLength, RxDesc->Length);
+        TEST_EQUAL(ActualPacketLength, RxDesc->length);
         TEST_TRUE(
             RtlEqualMemory(
-                Xsk.Umem.Buffer.get() + RxDesc->Address.BaseAddress + RxDesc->Address.Offset,
+                Xsk.Umem.Buffer.get() +
+                    XskDescriptorGetAddress(RxDesc->address) + XskDescriptorGetOffset(RxDesc->address),
                 &PacketBuffer[0] + Params->Backfill,
                 ActualPacketLength));
     } else if (Params->Action == XDP_PROGRAM_ACTION_L2FWD) {
@@ -4248,157 +4009,14 @@ GenericRxFromTxInspect(
     for (UINT32 FrameIndex = 0; FrameIndex < NumFrames; FrameIndex++) {
         auto RxDesc = SocketGetAndFreeRxDesc(&Xsk, ConsumerIndex++);
 
-        TEST_EQUAL(UDP_HEADER_BACKFILL(Af) + UdpSegmentSize, RxDesc->Length);
+        TEST_EQUAL(UDP_HEADER_BACKFILL(Af) + UdpSegmentSize, RxDesc->length);
         TEST_TRUE(
             RtlEqualMemory(
                 Xsk.Umem.Buffer.get() + UDP_HEADER_BACKFILL(Af) +
-                    RxDesc->Address.BaseAddress + RxDesc->Address.Offset,
+                    XskDescriptorGetAddress(RxDesc->address) +
+                        XskDescriptorGetOffset(RxDesc->address),
                 &UdpPayload[FrameIndex * UdpSegmentSize],
                 UdpSegmentSize));
-    }
-}
-
-static
-VOID
-GenerateTestPassword(
-    _Out_writes_z_(BufferCount) WCHAR *Buffer,
-    _In_ UINT32 BufferCount
-    )
-{
-    TEST_TRUE(BufferCount >= 4);
-    ASSERT(BufferCount >= 4);
-
-    //
-    // Terminate the string and attempt to satisfy complexity requirements with
-    // some hard-coded values.
-    //
-    Buffer[--BufferCount] = L'\0';
-    Buffer[--BufferCount] = L'A';
-    Buffer[--BufferCount] = L'b';
-    Buffer[--BufferCount] = L'#';
-
-    for (UINT32 i = 0; i < BufferCount; i++) {
-        static const WCHAR Characters[] =
-            L"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-            "abcdefghijklmnopqrstuvwxyz"
-            "0123456789";
-
-        unsigned int r;
-        rand_s(&r);
-
-        Buffer[i] = Characters[r % RTL_NUMBER_OF(Characters)];
-    }
-}
-
-VOID
-SecurityAdjustDeviceAcl()
-{
-    PCWSTR UserName = L"xdpfnuser";
-    WCHAR UserPassword[16 + 1];
-    USER_INFO_1 UserInfo = {0};
-    NET_API_STATUS UserStatus;
-    SE_SID UserSid;
-    SID_NAME_USE UserSidUse;
-    auto If = FnMpIf;
-
-    //
-    // Create a standard, non-admin user on the local system and create a logon
-    // session for them.
-    //
-
-    UserInfo.usri1_name = (PWSTR)UserName;
-    UserInfo.usri1_password = (PWSTR)UserPassword;
-    UserInfo.usri1_priv = USER_PRIV_USER;
-    UserInfo.usri1_flags = UF_SCRIPT | UF_PASSWD_NOTREQD | UF_DONT_EXPIRE_PASSWD;
-
-    for (UINT32 i = 0; i < 10; i++) {
-        GenerateTestPassword(UserPassword, RTL_NUMBER_OF(UserPassword));
-
-        UserStatus = NetUserAdd(NULL, 1, (BYTE *)&UserInfo, NULL);
-        if (UserStatus == NERR_Success) {
-            break;
-        }
-    }
-
-    TEST_EQUAL(NERR_Success, UserStatus);
-
-    auto UserRemove = wil::scope_exit([&]
-    {
-        NET_API_STATUS UserStatus = NetUserDel(NULL, UserName);
-
-        if (UserStatus != NERR_Success) {
-            TEST_WARNING("NetUserDel failed: %x", UserStatus);
-        }
-    });
-
-    wil::unique_handle Token;
-    TEST_TRUE(LogonUserW(
-        UserName, L".", UserPassword, LOGON32_LOGON_NETWORK, LOGON32_PROVIDER_DEFAULT, &Token));
-
-    //
-    // As the non-admin user, verify XDP denies access to all handle types.
-    //
-    {
-        TEST_TRUE(ImpersonateLoggedOnUser(Token.get()));
-        auto Unimpersonate = wil::scope_exit([&]
-        {
-            RevertToSelf();
-        });
-
-        wil::unique_handle Socket;
-        TEST_EQUAL(
-            HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED),
-            TryCreateSocket(Socket));
-
-        wil::unique_handle Interface;
-        TEST_EQUAL(
-            HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED),
-            TryInterfaceOpen(If.GetIfIndex(), Interface));
-    }
-
-    //
-    // Grant the test's standard user access to XDP.
-    //
-
-    DWORD SidSize = sizeof(UserSid);
-    WCHAR Domain[256];
-    DWORD DomainSize = RTL_NUMBER_OF(Domain);
-
-    TEST_TRUE(LookupAccountNameW(
-        NULL, UserName, &UserSid.Sid, &SidSize, Domain, &DomainSize, &UserSidUse));
-
-    wil::unique_hlocal_ansistring SidString;
-    TEST_TRUE(ConvertSidToStringSidA(&UserSid.Sid, wil::out_param(SidString)));
-
-    CHAR SddlBuff[256];
-    RtlZeroMemory(SddlBuff, sizeof(SddlBuff));
-    sprintf_s(SddlBuff, DEFAULT_XDP_SDDL "(A;;GA;;;%s)", SidString.get());
-
-    SetDeviceSddl(SddlBuff);
-    auto ResetSddl = wil::scope_exit([&]
-    {
-        SetDeviceSddl(DEFAULT_XDP_SDDL);
-
-        HRESULT Result = TryRestartService(XDP_SERVICE_NAME);
-        if (FAILED(Result)) {
-            TEST_WARNING("TryRestartService(XDP_SERVICE_NAME) failed: %x", Result);
-        }
-    });
-
-    TEST_HRESULT(TryRestartService(XDP_SERVICE_NAME));
-
-    //
-    // As the non-admin user, verify XDP now grants access to all handle types.
-    //
-    {
-        TEST_TRUE(ImpersonateLoggedOnUser(Token.get()));
-        auto Unimpersonate = wil::scope_exit([&]
-        {
-            RevertToSelf();
-        });
-
-        CreateSocket();
-        InterfaceOpen(If.GetIfIndex());
     }
 }
 
@@ -4722,7 +4340,7 @@ GenericTxToRxInject()
     CHAR RecvPayload[sizeof(UdpPayload)];
     UINT64 TxBuffer = SocketFreePop(&Xsk);
     UCHAR *UdpFrame = Xsk.Umem.Buffer.get() + TxBuffer + FrameOffset;
-    UINT32 UdpFrameLength = Xsk.Umem.Reg.ChunkSize - FrameOffset;
+    UINT32 UdpFrameLength = Xsk.Umem.Reg.chunkSize - FrameOffset;
     TEST_TRUE(
         PktBuildUdpFrame(
             UdpFrame, &UdpFrameLength, UdpPayload, sizeof(UdpPayload), &LocalHw,
@@ -4732,9 +4350,9 @@ GenericTxToRxInject()
     TEST_EQUAL(1, XskRingProducerReserve(&Xsk.Rings.Tx, 1, &ProducerIndex));
 
     XSK_BUFFER_DESCRIPTOR *TxDesc = SocketGetTxDesc(&Xsk, ProducerIndex++);
-    TxDesc->Address.BaseAddress = TxBuffer;
-    TxDesc->Address.Offset = FrameOffset;
-    TxDesc->Length = UdpFrameLength;
+    TxDesc->address = TxBuffer;
+    XskDescriptorSetOffset(&TxDesc->address, FrameOffset);
+    TxDesc->length = UdpFrameLength;
     XskRingProducerSubmit(&Xsk.Rings.Tx, 1);
 
     XSK_NOTIFY_RESULT_FLAGS NotifyResult;
@@ -4762,7 +4380,7 @@ GenericTxSingleFrame()
     UINT64 TxBuffer = SocketFreePop(&Xsk);
     UCHAR *TxFrame = Xsk.Umem.Buffer.get() + TxBuffer + FrameOffset;
     UINT32 TxFrameLength = sizeof(Pattern) + sizeof(Payload);
-    ASSERT(FrameOffset + TxFrameLength <= Xsk.Umem.Reg.ChunkSize);
+    ASSERT(FrameOffset + TxFrameLength <= Xsk.Umem.Reg.chunkSize);
 
     RtlCopyMemory(TxFrame, &Pattern, sizeof(Pattern));
     RtlCopyMemory(TxFrame + sizeof(Pattern), Payload, sizeof(Payload));
@@ -4771,9 +4389,9 @@ GenericTxSingleFrame()
     TEST_EQUAL(1, XskRingProducerReserve(&Xsk.Rings.Tx, 1, &ProducerIndex));
 
     XSK_BUFFER_DESCRIPTOR *TxDesc = SocketGetTxDesc(&Xsk, ProducerIndex++);
-    TxDesc->Address.BaseAddress = TxBuffer;
-    TxDesc->Address.Offset = FrameOffset;
-    TxDesc->Length = TxFrameLength;
+    TxDesc->address = TxBuffer;
+    XskDescriptorSetOffset(&TxDesc->address, FrameOffset);
+    TxDesc->length = TxFrameLength;
     XskRingProducerSubmit(&Xsk.Rings.Tx, 1);
 
     XSK_NOTIFY_RESULT_FLAGS NotifyResult;
@@ -4819,7 +4437,7 @@ GenericTxOutOfOrder()
     UCHAR *TxFrame0 = Xsk.Umem.Buffer.get() + TxBuffer0 + FrameOffset;
     UCHAR *TxFrame1 = Xsk.Umem.Buffer.get() + TxBuffer1 + FrameOffset;
     UINT32 TxFrameLength = sizeof(Pattern) + sizeof(Payload);
-    ASSERT(FrameOffset + TxFrameLength <= Xsk.Umem.Reg.ChunkSize);
+    ASSERT(FrameOffset + TxFrameLength <= Xsk.Umem.Reg.chunkSize);
 
     RtlCopyMemory(TxFrame0, &Pattern, sizeof(Pattern));
     RtlCopyMemory(TxFrame1, &Pattern, sizeof(Pattern));
@@ -4830,13 +4448,13 @@ GenericTxOutOfOrder()
     TEST_EQUAL(2, XskRingProducerReserve(&Xsk.Rings.Tx, 2, &ProducerIndex));
 
     XSK_BUFFER_DESCRIPTOR *TxDesc0 = SocketGetTxDesc(&Xsk, ProducerIndex++);
-    TxDesc0->Address.BaseAddress = TxBuffer0;
-    TxDesc0->Address.Offset = FrameOffset;
-    TxDesc0->Length = TxFrameLength;
+    TxDesc0->address = TxBuffer0;
+    XskDescriptorSetOffset(&TxDesc0->address, FrameOffset);
+    TxDesc0->length = TxFrameLength;
     XSK_BUFFER_DESCRIPTOR *TxDesc1 = SocketGetTxDesc(&Xsk, ProducerIndex++);
-    TxDesc1->Address.BaseAddress = TxBuffer1;
-    TxDesc1->Address.Offset = FrameOffset;
-    TxDesc1->Length = TxFrameLength;
+    TxDesc1->address = TxBuffer1;
+    XskDescriptorSetOffset(&TxDesc1->address, FrameOffset);
+    TxDesc1->length = TxFrameLength;
 
     XskRingProducerSubmit(&Xsk.Rings.Tx, 2);
 
@@ -4882,7 +4500,7 @@ GenericTxSharing()
         UINT64 TxBuffer = SocketFreePop(&Xsk);
         UCHAR *TxFrame = Xsk.Umem.Buffer.get() + TxBuffer + FrameOffset;
         UINT32 TxFrameLength = sizeof(Pattern) + sizeof(Payload);
-        ASSERT(FrameOffset + TxFrameLength <= Xsk.Umem.Reg.ChunkSize);
+        ASSERT(FrameOffset + TxFrameLength <= Xsk.Umem.Reg.chunkSize);
 
         RtlCopyMemory(TxFrame, &Pattern, sizeof(Pattern));
         RtlCopyMemory(TxFrame + sizeof(Pattern), Payload, sizeof(Payload));
@@ -4891,9 +4509,9 @@ GenericTxSharing()
         TEST_EQUAL(1, XskRingProducerReserve(&Xsk.Rings.Tx, 1, &ProducerIndex));
 
         XSK_BUFFER_DESCRIPTOR *TxDesc = SocketGetTxDesc(&Xsk, ProducerIndex++);
-        TxDesc->Address.BaseAddress = TxBuffer;
-        TxDesc->Address.Offset = FrameOffset;
-        TxDesc->Length = TxFrameLength;
+        TxDesc->address = TxBuffer;
+        XskDescriptorSetOffset(&TxDesc->address, FrameOffset);
+        TxDesc->length = TxFrameLength;
         XskRingProducerSubmit(&Xsk.Rings.Tx, 1);
 
         XSK_NOTIFY_RESULT_FLAGS NotifyResult;
@@ -4938,7 +4556,7 @@ GenericTxPoke()
     UINT64 TxBuffer = SocketFreePop(&Xsk);
     UCHAR *TxFrame = Xsk.Umem.Buffer.get() + TxBuffer + FrameOffset;
     UINT32 TxFrameLength = sizeof(Pattern) + sizeof(Payload);
-    ASSERT(FrameOffset + TxFrameLength <= Xsk.Umem.Reg.ChunkSize);
+    ASSERT(FrameOffset + TxFrameLength <= Xsk.Umem.Reg.chunkSize);
 
     RtlCopyMemory(TxFrame, &Pattern, sizeof(Pattern));
     RtlCopyMemory(TxFrame + sizeof(Pattern), Payload, sizeof(Payload));
@@ -4947,9 +4565,9 @@ GenericTxPoke()
     TEST_EQUAL(1, XskRingProducerReserve(&Xsk.Rings.Tx, 1, &ProducerIndex));
 
     XSK_BUFFER_DESCRIPTOR *TxDesc = SocketGetTxDesc(&Xsk, ProducerIndex++);
-    TxDesc->Address.BaseAddress = TxBuffer;
-    TxDesc->Address.Offset = FrameOffset;
-    TxDesc->Length = TxFrameLength;
+    TxDesc->address = TxBuffer;
+    XskDescriptorSetOffset(&TxDesc->address, FrameOffset);
+    TxDesc->length = TxFrameLength;
 
     TEST_TRUE(XskRingProducerNeedPoke(&Xsk.Rings.Tx));
     XskRingProducerSubmit(&Xsk.Rings.Tx, 1);
@@ -5027,8 +4645,8 @@ GenericTxMtu()
     TEST_EQUAL(1, XskRingProducerReserve(&Xsk.Rings.Tx, 1, &ProducerIndex));
 
     XSK_BUFFER_DESCRIPTOR *TxDesc = SocketGetTxDesc(&Xsk, ProducerIndex++);
-    TxDesc->Address.AddressAndOffset = TxBuffer;
-    TxDesc->Length = TestMtu;
+    TxDesc->address = TxBuffer;
+    TxDesc->length = TestMtu;
 
     XskRingProducerSubmit(&Xsk.Rings.Tx, 1);
     XSK_NOTIFY_RESULT_FLAGS NotifyResult;
@@ -5039,7 +4657,7 @@ GenericTxMtu()
     XSK_STATISTICS Stats = {0};
     UINT32 StatsSize = sizeof(Stats);
     GetSockopt(Xsk.Handle.get(), XSK_SOCKOPT_STATISTICS, &Stats, &StatsSize);
-    TEST_EQUAL(0, Stats.TxInvalidDescriptors);
+    TEST_EQUAL(0, Stats.txInvalidDescriptors);
 
     //
     // Post a TX larger than the MTU and verify the packet was dropped.
@@ -5052,8 +4670,8 @@ GenericTxMtu()
     TEST_EQUAL(1, XskRingProducerReserve(&Xsk.Rings.Tx, 1, &ProducerIndex));
 
     TxDesc = SocketGetTxDesc(&Xsk, ProducerIndex++);
-    TxDesc->Address.AddressAndOffset = TxBuffer;
-    TxDesc->Length = TestMtu + 1;
+    TxDesc->address = TxBuffer;
+    TxDesc->length = TestMtu + 1;
 
     XskRingProducerSubmit(&Xsk.Rings.Tx, 1);
     NotifySocket(Xsk.Handle.get(), XSK_NOTIFY_FLAG_POKE_TX, 0, &NotifyResult);
@@ -5063,11 +4681,11 @@ GenericTxMtu()
     do {
         GetSockopt(Xsk.Handle.get(), XSK_SOCKOPT_STATISTICS, &Stats, &StatsSize);
 
-        if (Stats.TxInvalidDescriptors == 1) {
+        if (Stats.txInvalidDescriptors == 1) {
             break;
         }
     } while (!Watchdog.IsExpired());
-    TEST_EQUAL(1, Stats.TxInvalidDescriptors);
+    TEST_EQUAL(1, Stats.txInvalidDescriptors);
 }
 
 VOID
@@ -5102,15 +4720,15 @@ GenericXskWait(
         UINT64 TxBuffer = SocketFreePop(&Xsk);
         UCHAR *TxFrame = Xsk.Umem.Buffer.get() + TxBuffer;
         UINT32 TxFrameLength = sizeof(Payload);
-        ASSERT(TxFrameLength <= Xsk.Umem.Reg.ChunkSize);
+        ASSERT(TxFrameLength <= Xsk.Umem.Reg.chunkSize);
         RtlCopyMemory(TxFrame, Payload, sizeof(Payload));
 
         UINT32 ProducerIndex;
         TEST_EQUAL(1, XskRingProducerReserve(&Xsk.Rings.Tx, 1, &ProducerIndex));
 
         XSK_BUFFER_DESCRIPTOR *TxDesc = SocketGetTxDesc(&Xsk, ProducerIndex++);
-        TxDesc->Address.AddressAndOffset = TxBuffer;
-        TxDesc->Length = TxFrameLength;
+        TxDesc->address = TxBuffer;
+        TxDesc->length = TxFrameLength;
         XskRingProducerSubmit(&Xsk.Rings.Tx, 1);
 
         XSK_NOTIFY_RESULT_FLAGS PokeResult;
@@ -5234,15 +4852,15 @@ GenericXskWaitAsync(
         UINT64 TxBuffer = SocketFreePop(&Xsk);
         UCHAR *TxFrame = Xsk.Umem.Buffer.get() + TxBuffer;
         UINT32 TxFrameLength = sizeof(Payload);
-        ASSERT(TxFrameLength <= Xsk.Umem.Reg.ChunkSize);
+        ASSERT(TxFrameLength <= Xsk.Umem.Reg.chunkSize);
         RtlCopyMemory(TxFrame, Payload, sizeof(Payload));
 
         UINT32 ProducerIndex;
         TEST_EQUAL(1, XskRingProducerReserve(&Xsk.Rings.Tx, 1, &ProducerIndex));
 
         XSK_BUFFER_DESCRIPTOR *TxDesc = SocketGetTxDesc(&Xsk, ProducerIndex++);
-        TxDesc->Address.AddressAndOffset = TxBuffer;
-        TxDesc->Length = TxFrameLength;
+        TxDesc->address = TxBuffer;
+        TxDesc->length = TxFrameLength;
         XskRingProducerSubmit(&Xsk.Rings.Tx, 1);
 
         XSK_NOTIFY_RESULT_FLAGS PokeResult;
@@ -5556,7 +5174,7 @@ GenericLoopback(
 
     UINT64 TxBuffer = SocketFreePop(&Xsk);
     UCHAR *TxFrame = Xsk.Umem.Buffer.get() + TxBuffer;
-    ASSERT(UdpFrameLength <= Xsk.Umem.Reg.ChunkSize);
+    ASSERT(UdpFrameLength <= Xsk.Umem.Reg.chunkSize);
 
     RtlCopyMemory(TxFrame, UdpFrame, UdpFrameLength);
 
@@ -5564,8 +5182,8 @@ GenericLoopback(
     TEST_EQUAL(1, XskRingProducerReserve(&Xsk.Rings.Tx, 1, &ProducerIndex));
 
     XSK_BUFFER_DESCRIPTOR *TxDesc = SocketGetTxDesc(&Xsk, ProducerIndex++);
-    TxDesc->Address.AddressAndOffset = TxBuffer;
-    TxDesc->Length = UdpFrameLength;
+    TxDesc->address = TxBuffer;
+    TxDesc->length = UdpFrameLength;
     XskRingProducerSubmit(&Xsk.Rings.Tx, 1);
 
     XSK_NOTIFY_RESULT_FLAGS NotifyResult;
@@ -5696,7 +5314,7 @@ FnLwfTx()
 VOID
 FnLwfOid()
 {
-    OID_KEY OidKeys[2];
+    OID_KEY OidKeys[2] = {0};
     UINT32 MpInfoBufferLength;
     unique_malloc_ptr<VOID> MpInfoBuffer;
     UINT32 LwfInfoBufferLength;
@@ -5709,7 +5327,8 @@ FnLwfOid()
     // the set OID makes it to the miniport. N.B. this get OID is handled by
     // NDIS, not the miniport.
     //
-    InitializeOidKey(&OidKeys[0], OID_GEN_CURRENT_PACKET_FILTER, NdisRequestQueryInformation);
+    OidKeys[0].Oid = OID_GEN_CURRENT_PACKET_FILTER;
+    OidKeys[0].RequestType = NdisRequestQueryInformation;
     LwfInfoBufferLength = sizeof(OriginalPacketFilter);
     TEST_HRESULT(
         LwfOidSubmitRequest(DefaultLwf, OidKeys[0], &LwfInfoBufferLength, &OriginalPacketFilter));
@@ -5717,12 +5336,14 @@ FnLwfOid()
     //
     // Get.
     //
-    InitializeOidKey(&OidKeys[0], OID_GEN_RECEIVE_BLOCK_SIZE, NdisRequestQueryInformation);
+    OidKeys[0].Oid = OID_GEN_RECEIVE_BLOCK_SIZE;
+    OidKeys[0].RequestType = NdisRequestQueryInformation;
 
     //
     // Set.
     //
-    InitializeOidKey(&OidKeys[1], OID_GEN_CURRENT_PACKET_FILTER, NdisRequestSetInformation);
+    OidKeys[1].Oid = OID_GEN_CURRENT_PACKET_FILTER;
+    OidKeys[1].RequestType = NdisRequestSetInformation;
 
     for (UINT32 Index = 0; Index < RTL_NUMBER_OF(OidKeys); Index++) {
         auto AdapterMp = MpOpenAdapter(FnMpIf.GetIfIndex());
@@ -5838,8 +5459,9 @@ SetXdpRss(
     // the handle to allow OID completion.
     //
 
-    OID_KEY Key;
-    InitializeOidKey(&Key, OID_GEN_RECEIVE_SCALE_PARAMETERS, NdisRequestSetInformation);
+    OID_KEY Key {0};
+    Key.Oid = OID_GEN_RECEIVE_SCALE_PARAMETERS;
+    Key.RequestType = NdisRequestSetInformation;
     MpOidFilter(AdapterMp, &Key, 1);
 
     auto AsyncThread = std::async(
@@ -6272,11 +5894,11 @@ OffloadRssInterfaceRestart()
 
     UINT32 Size = RssConfigSize;
     TEST_EQUAL(
-        HRESULT_FROM_WIN32(ERROR_NOT_READY),
+        HRESULT_FROM_WIN32(ERROR_BAD_COMMAND),
         TryRssGet(InterfaceHandle.get(), RssConfig.get(), &Size));
 
     TEST_EQUAL(
-        HRESULT_FROM_WIN32(ERROR_NOT_READY),
+        HRESULT_FROM_WIN32(ERROR_BAD_COMMAND),
         TryRssSet(InterfaceHandle.get(), RssConfig.get(), RssConfigSize));
 
     InterfaceHandle.reset();
@@ -6359,7 +5981,8 @@ OffloadRssUpperSet()
     // Get original settings (both XDP and NDIS formats for convenience).
     //
 
-    InitializeOidKey(&OidKey, OID_GEN_RECEIVE_SCALE_PARAMETERS, NdisRequestQueryInformation);
+    OidKey.Oid = OID_GEN_RECEIVE_SCALE_PARAMETERS;
+    OidKey.RequestType = NdisRequestQueryInformation;
     OriginalNdisRssParams =
         LwfOidAllocateAndSubmitRequest<NDIS_RECEIVE_SCALE_PARAMETERS>(
             DefaultLwf, OidKey, &OriginalNdisRssParamsSize);
@@ -6380,7 +6003,8 @@ OffloadRssUpperSet()
     //
     // Set upper edge settings via NDIS.
     //
-    InitializeOidKey(&OidKey, OID_GEN_RECEIVE_SCALE_PARAMETERS, NdisRequestSetInformation);
+    OidKey.Oid = OID_GEN_RECEIVE_SCALE_PARAMETERS;
+    OidKey.RequestType = NdisRequestSetInformation;
     UpperNdisRssParams.Header.Type = NDIS_OBJECT_TYPE_RSS_PARAMETERS;
     UpperNdisRssParams.Header.Revision = NDIS_RECEIVE_SCALE_PARAMETERS_REVISION_2;
     UpperNdisRssParams.Header.Size = NDIS_SIZEOF_RECEIVE_SCALE_PARAMETERS_REVISION_2;
@@ -6412,7 +6036,8 @@ OffloadRssUpperSet()
     //
     // Verify upper edge settings.
     //
-    InitializeOidKey(&OidKey, OID_GEN_RECEIVE_SCALE_PARAMETERS, NdisRequestQueryInformation);
+    OidKey.Oid = OID_GEN_RECEIVE_SCALE_PARAMETERS;
+    OidKey.RequestType = NdisRequestQueryInformation;
     NdisRssParams =
         LwfOidAllocateAndSubmitRequest<NDIS_RECEIVE_SCALE_PARAMETERS>(
             DefaultLwf, OidKey, &NdisRssParamsSize);
@@ -6575,101 +6200,6 @@ OffloadRssCapabilities()
     TEST_EQUAL(RssCapabilities->NumberOfIndirectionTableEntries, FNMP_MAX_RSS_INDIR_COUNT);
 }
 
-VOID
-OffloadRssReset()
-{
-    auto &If = FnMpIf;
-    unique_malloc_ptr<PROCESSOR_NUMBER> IndirectionTable;
-    unique_malloc_ptr<PROCESSOR_NUMBER> OriginalIndirectionTable;
-    unique_malloc_ptr<PROCESSOR_NUMBER> ResetIndirectionTable;
-    UINT32 IndirectionTableSize;
-    UINT32 OriginalIndirectionTableSize;
-
-    //
-    // Only run if we have at least 2 LPs.
-    // Our expected test automation environment is at least a 2VP VM.
-    //
-    if (GetProcessorCount() < 2) {
-        TEST_WARNING("Test requires at least 2 logical processors. Skipping.");
-        return;
-    }
-
-    auto InterfaceHandle = InterfaceOpen(FnMpIf.GetIfIndex());
-    auto AdapterMp = MpOpenAdapter(If.GetIfIndex());
-
-    //
-    // Query the original RSS table. This is what XDP should revert to when the
-    // interface is being torn down.
-    //
-    GetXdpRssIndirectionTable(FnMpIf, OriginalIndirectionTable, OriginalIndirectionTableSize);
-
-    //
-    // Create and set a new RSS table.
-    //
-
-    CreateIndirectionTable({1, 0}, IndirectionTable, &IndirectionTableSize);
-    unique_malloc_ptr<XDP_RSS_CONFIGURATION> RssConfig;
-    UINT16 HashSecretKeySize = 40;
-    UINT32 RssConfigSize = sizeof(*RssConfig) + HashSecretKeySize + IndirectionTableSize;
-
-    RssConfig.reset((XDP_RSS_CONFIGURATION *)malloc(RssConfigSize));
-    XdpInitializeRssConfiguration(RssConfig.get(), RssConfigSize);
-    RssConfig->HashSecretKeyOffset = sizeof(*RssConfig);
-    RssConfig->IndirectionTableOffset = RssConfig->HashSecretKeyOffset + HashSecretKeySize;
-
-    PROCESSOR_NUMBER *IndirectionTableDst =
-        (PROCESSOR_NUMBER *)RTL_PTR_ADD(RssConfig.get(), RssConfig->IndirectionTableOffset);
-    RtlCopyMemory(IndirectionTableDst, IndirectionTable.get(), IndirectionTableSize);
-
-    RssConfig->Flags =
-        XDP_RSS_FLAG_SET_HASH_TYPE | XDP_RSS_FLAG_SET_HASH_SECRET_KEY |
-        XDP_RSS_FLAG_SET_INDIRECTION_TABLE;
-    RssConfig->HashType = XDP_RSS_HASH_TYPE_TCP_IPV4 | XDP_RSS_HASH_TYPE_TCP_IPV6;
-    RssConfig->HashSecretKeySize = HashSecretKeySize;
-    RssConfig->IndirectionTableSize = (USHORT)IndirectionTableSize;
-
-    RssSet(InterfaceHandle.get(), RssConfig.get(), RssConfigSize);
-
-    //
-    // Set an OID filter, start tearing down the NIC and filter binding, verify
-    // the resulting OID, then close the handle to allow OID completion.
-    //
-
-    OID_KEY Key;
-    InitializeOidKey(&Key, OID_GEN_RECEIVE_SCALE_PARAMETERS, NdisRequestSetInformation);
-    MpOidFilter(AdapterMp, &Key, 1);
-
-    auto AsyncThread = std::async(
-        std::launch::async,
-        [&] {
-            return If.TryUnbindXdp();
-        }
-    );
-
-    auto BindingScopeGuard = wil::scope_exit([&]
-    {
-        TEST_HRESULT(If.TryRebindXdp());
-    });
-
-    UINT32 OidInfoBufferLength;
-    unique_malloc_ptr<VOID> OidInfoBuffer =
-        MpOidAllocateAndGetRequest(AdapterMp, Key, &OidInfoBufferLength, MP_RESTART_TIMEOUT);
-
-    NDIS_RECEIVE_SCALE_PARAMETERS *NdisParams =
-        (NDIS_RECEIVE_SCALE_PARAMETERS *)OidInfoBuffer.get();
-    TEST_EQUAL(NdisParams->IndirectionTableSize, OriginalIndirectionTableSize);
-    PROCESSOR_NUMBER *NdisIndirectionTable =
-        (PROCESSOR_NUMBER *)RTL_PTR_ADD(NdisParams, NdisParams->IndirectionTableOffset);
-    TEST_TRUE(
-        RtlEqualMemory(NdisIndirectionTable,
-        OriginalIndirectionTable.get(),
-        OriginalIndirectionTableSize));
-
-    AdapterMp.reset();
-    TEST_EQUAL(AsyncThread.wait_for(TEST_TIMEOUT_ASYNC), std::future_status::ready);
-    TEST_HRESULT(AsyncThread.get());
-}
-
 static
 VOID
 InitializeOffloadParams(
@@ -6722,7 +6252,8 @@ OffloadSetHardwareCapabilities()
         NDIS_OFFLOAD_PARAMETERS OffloadParams;
         InitializeOffloadParams(&OffloadParams);
         OffloadParams.UDPIPv4Checksum = NDIS_OFFLOAD_PARAMETERS_TX_ENABLED_RX_DISABLED;
-        InitializeOidKey(&OidKey, Configs[i].Oid, NdisRequestSetInformation);
+        OidKey.Oid = Configs[i].Oid;
+        OidKey.RequestType = NdisRequestSetInformation;
         UINT32 OidBufferSize = sizeof(OffloadParams);
         TEST_HRESULT(LwfOidSubmitRequest(DefaultLwf, OidKey, &OidBufferSize, &OffloadParams));
 
@@ -6745,7 +6276,8 @@ OffloadSetHardwareCapabilities()
     //
 
     OID_KEY OidKey;
-    InitializeOidKey(&OidKey, OID_TCP_OFFLOAD_CURRENT_CONFIG, NdisRequestQueryInformation);
+    OidKey.Oid = OID_TCP_OFFLOAD_CURRENT_CONFIG;
+    OidKey.RequestType = NdisRequestQueryInformation;
     UINT32 NdisOffloadSize;
     unique_malloc_ptr<NDIS_OFFLOAD> Offload =
         LwfOidAllocateAndSubmitRequest<NDIS_OFFLOAD>(DefaultLwf, OidKey, &NdisOffloadSize);
@@ -6758,11 +6290,11 @@ OffloadSetHardwareCapabilities()
     CHAR CmdBuff[256];
     RtlZeroMemory(CmdBuff, sizeof(CmdBuff));
     sprintf_s(CmdBuff, "%s /c Set-NetAdapterAdvancedProperty -ifDesc \"%s\" -DisplayName UDPChecksumOffloadIPv4Capability -DisplayValue 'TX Enabled' -NoRestart", PowershellPrefix, If.GetIfDesc());
-    TEST_EQUAL(0, InvokeSystem(CmdBuff));
+    TEST_EQUAL(0, system(CmdBuff));
 
     RtlZeroMemory(CmdBuff, sizeof(CmdBuff));
     sprintf_s(CmdBuff, "%s /c Set-NetAdapterAdvancedProperty -ifDesc \"%s\" -DisplayName UDPChecksumOffloadIPv4 -DisplayValue 'TX Enabled' -NoRestart", PowershellPrefix, If.GetIfDesc());
-    TEST_EQUAL(0, InvokeSystem(CmdBuff));
+    TEST_EQUAL(0, system(CmdBuff));
 
     If.Restart();
 
@@ -6884,8 +6416,8 @@ GenericXskQueryAffinity()
                 UINT32 ProducerIndex;
                 TEST_EQUAL(1, XskRingProducerReserve(&Socket.Rings.Tx, 1, &ProducerIndex));
                 XSK_BUFFER_DESCRIPTOR *TxDesc = SocketGetTxDesc(&Socket, ProducerIndex++);
-                TxDesc->Address.AddressAndOffset = TxBuffer;
-                TxDesc->Length = sizeof(BufferVa);
+                TxDesc->address = TxBuffer;
+                TxDesc->length = sizeof(BufferVa);
                 XskRingProducerSubmit(&Socket.Rings.Tx, 1);
                 XSK_NOTIFY_RESULT_FLAGS NotifyResult;
                 NotifySocket(Socket.Handle.get(), XSK_NOTIFY_FLAG_POKE_TX, 0, &NotifyResult);
@@ -6906,481 +6438,6 @@ GenericXskQueryAffinity()
             }
         }
     }
-}
-
-static const struct {
-    XDP_QUIC_OPERATION Xdp;
-    NDIS_QUIC_OPERATION Ndis;
-} QeoOperationMap[] = {
-    {
-        XDP_QUIC_OPERATION_ADD, NDIS_QUIC_OPERATION_ADD
-    },
-    {
-        XDP_QUIC_OPERATION_REMOVE, NDIS_QUIC_OPERATION_REMOVE
-    },
-};
-
-static const struct {
-    XDP_QUIC_DIRECTION Xdp;
-    NDIS_QUIC_DIRECTION Ndis;
-} QeoDirectionMap[] = {
-    {
-        XDP_QUIC_DIRECTION_TRANSMIT, NDIS_QUIC_DIRECTION_TRANSMIT
-    },
-    {
-        XDP_QUIC_DIRECTION_RECEIVE, NDIS_QUIC_DIRECTION_RECEIVE
-    },
-};
-
-static const struct {
-    XDP_QUIC_DECRYPT_FAILURE_ACTION Xdp;
-    NDIS_QUIC_DECRYPT_FAILURE_ACTION Ndis;
-} QeoDecryptFailureActionMap[] = {
-    {
-        XDP_QUIC_DECRYPT_FAILURE_ACTION_DROP, NDIS_QUIC_DECRYPT_FAILURE_ACTION_DROP
-    },
-    {
-        XDP_QUIC_DECRYPT_FAILURE_ACTION_CONTINUE, NDIS_QUIC_DECRYPT_FAILURE_ACTION_CONTINUE
-    },
-};
-
-static const struct {
-    XDP_QUIC_CIPHER_TYPE Xdp;
-    NDIS_QUIC_CIPHER_TYPE Ndis;
-} QeoCipherTypeMap[] = {
-    {
-        XDP_QUIC_CIPHER_TYPE_AEAD_AES_128_GCM, NDIS_QUIC_CIPHER_TYPE_AEAD_AES_128_GCM
-    },
-    {
-        XDP_QUIC_CIPHER_TYPE_AEAD_AES_256_GCM, NDIS_QUIC_CIPHER_TYPE_AEAD_AES_256_GCM
-    },
-    {
-        XDP_QUIC_CIPHER_TYPE_AEAD_CHACHA20_POLY1305, NDIS_QUIC_CIPHER_TYPE_AEAD_CHACHA20_POLY1305
-    },
-    {
-        XDP_QUIC_CIPHER_TYPE_AEAD_AES_128_CCM, NDIS_QUIC_CIPHER_TYPE_AEAD_AES_128_CCM
-    },
-};
-
-static const struct {
-    XDP_QUIC_ADDRESS_FAMILY Xdp;
-    NDIS_QUIC_ADDRESS_FAMILY Ndis;
-} QeoAddressFamilyMap[] = {
-    {
-        XDP_QUIC_ADDRESS_FAMILY_INET4, NDIS_QUIC_ADDRESS_FAMILY_INET4
-    },
-    {
-        XDP_QUIC_ADDRESS_FAMILY_INET6, NDIS_QUIC_ADDRESS_FAMILY_INET6
-    },
-};
-
-static const struct {
-    NDIS_STATUS Ndis;
-    HRESULT Xdp;
-} QeoOffloadStatusMap[] = {
-    {
-        NDIS_STATUS_FAILURE, HRESULT_FROM_WIN32(ERROR_GEN_FAILURE)
-    },
-    {
-        NDIS_STATUS_SUCCESS, S_OK
-    },
-};
-
-static
-NDIS_OID
-OffloadQeoGetExpectedOid()
-{
-    return
-        OsVersionIsGaOrLater() ?
-            OID_QUIC_CONNECTION_ENCRYPTION : OID_QUIC_CONNECTION_ENCRYPTION_PROTOTYPE;
-}
-
-VOID
-OffloadQeoConnection()
-{
-    for (const auto &Direction : QeoDirectionMap) {
-    for (const auto &DecryptFailureAction : QeoDecryptFailureActionMap) {
-    for (const auto &KeyPhase : {0U, 1U}) {
-    for (const auto &CipherType : QeoCipherTypeMap) {
-    for (const auto &AddressFamily : QeoAddressFamilyMap) {
-        auto If = FnMpIf;
-        auto InterfaceHandle = InterfaceOpen(If.GetIfIndex());
-
-        for (const auto &Operation : QeoOperationMap) {
-        for (const auto &OffloadStatus : QeoOffloadStatusMap) {
-            auto AdapterMp = MpOpenAdapter(If.GetIfIndex());
-
-            //
-            // Initialize the connection for the add operation.
-            //
-            XDP_QUIC_CONNECTION Connection;
-            XdpInitializeQuicConnection(&Connection, sizeof(Connection));
-            Connection.Operation = Operation.Xdp;
-            Connection.Direction = Direction.Xdp;
-            Connection.DecryptFailureAction = DecryptFailureAction.Xdp;
-            Connection.KeyPhase = KeyPhase;
-            Connection.CipherType = CipherType.Xdp;
-            Connection.AddressFamily = AddressFamily.Xdp;
-            Connection.UdpPort = htons(1234);
-            Connection.NextPacketNumber = 5678;
-            Connection.ConnectionIdLength = 3;
-            strcpy_s((CHAR *)Connection.Address, sizeof(Connection.Address), "Address");
-            strcpy_s((CHAR *)Connection.ConnectionId, sizeof(Connection.ConnectionId), "Id");
-            strcpy_s((CHAR *)Connection.PayloadKey, sizeof(Connection.PayloadKey), "PayloadKey");
-            strcpy_s((CHAR *)Connection.HeaderKey, sizeof(Connection.HeaderKey), "HeaderKey");
-            strcpy_s((CHAR *)Connection.PayloadIv, sizeof(Connection.PayloadIv), "PayloadIv");
-            Connection.Status = E_FAIL;
-
-            //
-            // Configure the functional miniport to capture the offload request OID.
-            //
-            OID_KEY Key;
-            InitializeOidKey(
-                &Key, OffloadQeoGetExpectedOid(), NdisRequestMethod, OID_REQUEST_INTERFACE_DIRECT);
-            MpOidFilter(AdapterMp, &Key, 1);
-
-            //
-            // Initiate the offload request on a separate thread: the operation will
-            // block until the OID is completed, which won't happen until the miniport
-            // handle is reset below.
-            //
-            auto AsyncThread = std::async(
-                std::launch::async,
-                [&] {
-                    return TryQeoSet(InterfaceHandle.get(), &Connection, sizeof(Connection));
-                }
-            );
-
-            //
-            // In case of failure, ensure the adapter is cleaned up before the
-            // async thread destructor runs; otherwise a deadlock on the OID
-            // path occurs.
-            //
-            auto AdapterScopeGuard = wil::scope_exit([&]
-            {
-                AdapterMp.reset();
-            });
-
-            //
-            // Retrieve the captured offload OID from the functional miniport.
-            //
-            UINT32 OidInfoBufferLength;
-            unique_malloc_ptr<VOID> OidInfoBuffer =
-                MpOidAllocateAndGetRequest(AdapterMp, Key, &OidInfoBufferLength);
-
-
-            //
-            // Verify the OID parameters match the XDP connection request.
-            //
-            NDIS_QUIC_CONNECTION *NdisConnection = (NDIS_QUIC_CONNECTION *)OidInfoBuffer.get();
-
-            TEST_EQUAL(sizeof(*NdisConnection), OidInfoBufferLength);
-
-            TEST_EQUAL((UINT32)Operation.Ndis, NdisConnection->Operation);
-            TEST_EQUAL((UINT32)Direction.Ndis, NdisConnection->Direction);
-            TEST_EQUAL((UINT32)DecryptFailureAction.Ndis, NdisConnection->DecryptFailureAction);
-            TEST_EQUAL(KeyPhase, NdisConnection->KeyPhase);
-            TEST_EQUAL((UINT32)CipherType.Ndis, NdisConnection->CipherType);
-            TEST_EQUAL(AddressFamily.Ndis, NdisConnection->AddressFamily);
-            TEST_EQUAL(Connection.UdpPort, NdisConnection->UdpPort);
-            TEST_EQUAL(Connection.NextPacketNumber, NdisConnection->NextPacketNumber);
-            TEST_EQUAL(Connection.ConnectionIdLength, NdisConnection->ConnectionIdLength);
-
-            C_ASSERT(sizeof(Connection.Address) == sizeof(NdisConnection->Address));
-            TEST_TRUE(RtlEqualMemory(
-                Connection.Address, NdisConnection->Address, sizeof(Connection.Address)));
-
-            C_ASSERT(sizeof(Connection.ConnectionId) == sizeof(NdisConnection->ConnectionId));
-            TEST_TRUE(RtlEqualMemory(
-                Connection.ConnectionId, NdisConnection->ConnectionId, Connection.ConnectionIdLength));
-
-            C_ASSERT(sizeof(Connection.PayloadKey) == sizeof(NdisConnection->PayloadKey));
-            TEST_TRUE(RtlEqualMemory(
-                Connection.PayloadKey, NdisConnection->PayloadKey, sizeof(Connection.PayloadKey)));
-
-            C_ASSERT(sizeof(Connection.HeaderKey) == sizeof(NdisConnection->HeaderKey));
-            TEST_TRUE(RtlEqualMemory(
-                Connection.HeaderKey, NdisConnection->HeaderKey, sizeof(Connection.HeaderKey)));
-
-            C_ASSERT(sizeof(Connection.PayloadIv) == sizeof(NdisConnection->PayloadIv));
-            TEST_TRUE(RtlEqualMemory(
-                Connection.PayloadIv, NdisConnection->PayloadIv, sizeof(Connection.PayloadIv)));
-
-            //
-            // Complete the OID with the connection offload status updated.
-            //
-            NdisConnection->Status = OffloadStatus.Ndis;
-
-            MpOidCompleteRequest(
-                AdapterMp, Key, NDIS_STATUS_SUCCESS, NdisConnection, sizeof(*NdisConnection));
-
-            //
-            // Verify the XDP offload API is completed once the OID completes.
-            //
-            TEST_EQUAL(AsyncThread.wait_for(TEST_TIMEOUT_ASYNC), std::future_status::ready);
-
-            //
-            // Verify the XDP offload API succeeded.
-            //
-            TEST_HRESULT(AsyncThread.get());
-
-            //
-            // Verify the connection's status field was updated with the miniport
-            // status.
-            //
-            TEST_EQUAL(OffloadStatus.Xdp, Connection.Status);
-
-            if (SUCCEEDED(OffloadStatus.Xdp)) {
-                //
-                // Verify duplicate connections cannot be added, and non-existent
-                // entries cannot be removed.
-                //
-                if (Operation.Xdp == XDP_QUIC_OPERATION_ADD) {
-                    TEST_EQUAL(
-                        HRESULT_FROM_WIN32(ERROR_OBJECT_ALREADY_EXISTS),
-                        TryQeoSet(InterfaceHandle.get(), &Connection, sizeof(Connection)));
-                } else {
-                    ASSERT(Operation.Xdp == XDP_QUIC_OPERATION_REMOVE);
-                    TEST_EQUAL(
-                        HRESULT_FROM_WIN32(ERROR_NOT_FOUND),
-                        TryQeoSet(InterfaceHandle.get(), &Connection, sizeof(Connection)));
-                }
-            }
-        }}}}}}
-    }
-}
-
-VOID
-OffloadQeoRevert(
-    _In_ REVERT_REASON RevertReason
-    )
-{
-    auto If = FnMpIf;
-    auto InterfaceHandle = InterfaceOpen(If.GetIfIndex());
-    auto AdapterMp = MpOpenAdapter(If.GetIfIndex());
-    const auto Timeout =
-        RevertReason == RevertReasonInterfaceRemoval ?
-            MP_RESTART_TIMEOUT : TEST_TIMEOUT_ASYNC;
-
-    const auto &Operation = QeoOperationMap[0];
-    const auto &Direction = QeoDirectionMap[0];
-    const auto &DecryptFailureAction = QeoDecryptFailureActionMap[0];
-    const auto &KeyPhase = 0U;
-    const auto &CipherType = QeoCipherTypeMap[0];
-    const auto &AddressFamily = QeoAddressFamilyMap[0];
-
-    ASSERT(Operation.Xdp == XDP_QUIC_OPERATION_ADD);
-
-    //
-    // Initialize the connection for the add operation.
-    //
-    XDP_QUIC_CONNECTION Connection;
-    XdpInitializeQuicConnection(&Connection, sizeof(Connection));
-    Connection.Operation = Operation.Xdp;
-    Connection.Direction = Direction.Xdp;
-    Connection.DecryptFailureAction = DecryptFailureAction.Xdp;
-    Connection.KeyPhase = KeyPhase;
-    Connection.CipherType = CipherType.Xdp;
-    Connection.AddressFamily = AddressFamily.Xdp;
-    Connection.UdpPort = htons(1234);
-    Connection.NextPacketNumber = 5678;
-    Connection.ConnectionIdLength = 3;
-    strcpy_s((CHAR *)Connection.Address, sizeof(Connection.Address), "Address");
-    strcpy_s((CHAR *)Connection.ConnectionId, sizeof(Connection.ConnectionId), "Id");
-    strcpy_s((CHAR *)Connection.PayloadKey, sizeof(Connection.PayloadKey), "PayloadKey");
-    strcpy_s((CHAR *)Connection.HeaderKey, sizeof(Connection.HeaderKey), "HeaderKey");
-    strcpy_s((CHAR *)Connection.PayloadIv, sizeof(Connection.PayloadIv), "PayloadIv");
-    Connection.Status = E_FAIL;
-
-    TEST_HRESULT(TryQeoSet(InterfaceHandle.get(), &Connection, sizeof(Connection)));
-
-    //
-    // Configure the functional miniport to capture the offload request OID.
-    //
-    OID_KEY Key;
-    InitializeOidKey(
-        &Key, OffloadQeoGetExpectedOid(), NdisRequestMethod, OID_REQUEST_INTERFACE_DIRECT);
-    MpOidFilter(AdapterMp, &Key, 1);
-
-    //
-    // Initiate the offload request on a separate thread: the operation will
-    // block until the OID is completed, which won't happen until the miniport
-    // handle is reset below.
-    //
-    auto AsyncThread = std::async(
-        std::launch::async,
-        [&] {
-            if (RevertReason == RevertReasonInterfaceRemoval) {
-                return If.TryRestart();
-            } else {
-                ASSERT(RevertReason == RevertReasonHandleClosure);
-                InterfaceHandle.reset();
-                return (BOOLEAN)TRUE;
-            }
-        }
-    );
-
-    //
-    // In case of failure, ensure the adapter is cleaned up before the
-    // async thread destructor runs; otherwise a deadlock on the OID
-    // path occurs.
-    //
-    auto AdapterScopeGuard = wil::scope_exit([&]
-    {
-        AdapterMp.reset();
-    });
-
-    //
-    // Retrieve the captured offload OID from the functional miniport.
-    //
-    UINT32 OidInfoBufferLength;
-    unique_malloc_ptr<VOID> OidInfoBuffer =
-        MpOidAllocateAndGetRequest(AdapterMp, Key, &OidInfoBufferLength, Timeout);
-
-    //
-    // Verify the OID parameters match the XDP connection request.
-    //
-    NDIS_QUIC_CONNECTION *NdisConnection = (NDIS_QUIC_CONNECTION *)OidInfoBuffer.get();
-
-    TEST_EQUAL(sizeof(*NdisConnection), OidInfoBufferLength);
-
-    TEST_EQUAL((UINT32)NDIS_QUIC_OPERATION_REMOVE, NdisConnection->Operation);
-    TEST_EQUAL((UINT32)Direction.Ndis, NdisConnection->Direction);
-    TEST_EQUAL((UINT32)DecryptFailureAction.Ndis, NdisConnection->DecryptFailureAction);
-    TEST_EQUAL(KeyPhase, NdisConnection->KeyPhase);
-    TEST_EQUAL((UINT32)CipherType.Ndis, NdisConnection->CipherType);
-    TEST_EQUAL(AddressFamily.Ndis, NdisConnection->AddressFamily);
-    TEST_EQUAL(Connection.UdpPort, NdisConnection->UdpPort);
-    TEST_EQUAL(Connection.NextPacketNumber, NdisConnection->NextPacketNumber);
-    TEST_EQUAL(Connection.ConnectionIdLength, NdisConnection->ConnectionIdLength);
-
-    C_ASSERT(sizeof(Connection.Address) == sizeof(NdisConnection->Address));
-    TEST_TRUE(RtlEqualMemory(
-        Connection.Address, NdisConnection->Address, sizeof(Connection.Address)));
-
-    C_ASSERT(sizeof(Connection.ConnectionId) == sizeof(NdisConnection->ConnectionId));
-    TEST_TRUE(RtlEqualMemory(
-        Connection.ConnectionId, NdisConnection->ConnectionId, Connection.ConnectionIdLength));
-
-    C_ASSERT(sizeof(Connection.PayloadKey) == sizeof(NdisConnection->PayloadKey));
-    TEST_TRUE(RtlEqualMemory(
-        Connection.PayloadKey, NdisConnection->PayloadKey, sizeof(Connection.PayloadKey)));
-
-    C_ASSERT(sizeof(Connection.HeaderKey) == sizeof(NdisConnection->HeaderKey));
-    TEST_TRUE(RtlEqualMemory(
-        Connection.HeaderKey, NdisConnection->HeaderKey, sizeof(Connection.HeaderKey)));
-
-    C_ASSERT(sizeof(Connection.PayloadIv) == sizeof(NdisConnection->PayloadIv));
-    TEST_TRUE(RtlEqualMemory(
-        Connection.PayloadIv, NdisConnection->PayloadIv, sizeof(Connection.PayloadIv)));
-
-    //
-    // Reset the miniport handle, allowing the captured OID to be completed.
-    //
-    AdapterMp.reset();
-
-    //
-    // Verify the revert/teardown is completed once the OID completes.
-    //
-    TEST_EQUAL(AsyncThread.wait_for(Timeout), std::future_status::ready);
-
-    //
-    // Verify the revert/teardown succeeded.
-    //
-    TEST_TRUE(AsyncThread.get());
-}
-
-VOID
-OffloadQeoOidFailure(
-    )
-{
-    auto If = FnMpIf;
-    auto InterfaceHandle = InterfaceOpen(If.GetIfIndex());
-    auto AdapterMp = MpOpenAdapter(If.GetIfIndex());
-
-    const auto &Operation = QeoOperationMap[0];
-    const auto &Direction = QeoDirectionMap[0];
-    const auto &DecryptFailureAction = QeoDecryptFailureActionMap[0];
-    const auto &KeyPhase = 0U;
-    const auto &CipherType = QeoCipherTypeMap[0];
-    const auto &AddressFamily = QeoAddressFamilyMap[0];
-
-    ASSERT(Operation.Xdp == XDP_QUIC_OPERATION_ADD);
-
-    //
-    // Initialize the connection for the add operation.
-    //
-    XDP_QUIC_CONNECTION Connection;
-    XdpInitializeQuicConnection(&Connection, sizeof(Connection));
-    Connection.Operation = Operation.Xdp;
-    Connection.Direction = Direction.Xdp;
-    Connection.DecryptFailureAction = DecryptFailureAction.Xdp;
-    Connection.KeyPhase = KeyPhase;
-    Connection.CipherType = CipherType.Xdp;
-    Connection.AddressFamily = AddressFamily.Xdp;
-    Connection.UdpPort = htons(1234);
-    Connection.NextPacketNumber = 5678;
-    Connection.ConnectionIdLength = 3;
-    strcpy_s((CHAR *)Connection.Address, sizeof(Connection.Address), "Address");
-    strcpy_s((CHAR *)Connection.ConnectionId, sizeof(Connection.ConnectionId), "Id");
-    strcpy_s((CHAR *)Connection.PayloadKey, sizeof(Connection.PayloadKey), "PayloadKey");
-    strcpy_s((CHAR *)Connection.HeaderKey, sizeof(Connection.HeaderKey), "HeaderKey");
-    strcpy_s((CHAR *)Connection.PayloadIv, sizeof(Connection.PayloadIv), "PayloadIv");
-    Connection.Status = E_FAIL;
-
-    //
-    // Configure the functional miniport to capture the offload request OID.
-    //
-    OID_KEY Key;
-    InitializeOidKey(
-        &Key, OffloadQeoGetExpectedOid(), NdisRequestMethod, OID_REQUEST_INTERFACE_DIRECT);
-    MpOidFilter(AdapterMp, &Key, 1);
-
-    //
-    // Initiate the offload request on a separate thread: the operation will
-    // block until the OID is completed, which won't happen until the miniport
-    // handle is reset below.
-    //
-    auto AsyncThread = std::async(
-        std::launch::async,
-        [&] {
-            return TryQeoSet(InterfaceHandle.get(), &Connection, sizeof(Connection));
-        }
-    );
-
-    //
-    // In case of failure, ensure the adapter is cleaned up before the
-    // async thread destructor runs; otherwise a deadlock on the OID
-    // path occurs.
-    //
-    auto AdapterScopeGuard = wil::scope_exit([&]
-    {
-        AdapterMp.reset();
-    });
-
-    //
-    // Retrieve the captured offload OID from the functional miniport.
-    //
-    UINT32 OidInfoBufferLength;
-    unique_malloc_ptr<VOID> OidInfoBuffer =
-        MpOidAllocateAndGetRequest(AdapterMp, Key, &OidInfoBufferLength);
-
-    NDIS_QUIC_CONNECTION *NdisConnection = (NDIS_QUIC_CONNECTION *)OidInfoBuffer.get();
-
-    TEST_EQUAL(sizeof(*NdisConnection), OidInfoBufferLength);
-    TEST_EQUAL(NDIS_STATUS_PENDING, NdisConnection->Status);
-
-    MpOidCompleteRequest(AdapterMp, Key, NDIS_STATUS_FAILURE, NdisConnection, OidInfoBufferLength);
-
-    //
-    // Verify the offload API fails once the OID completes.
-    //
-    TEST_EQUAL(AsyncThread.wait_for(TEST_TIMEOUT_ASYNC), std::future_status::ready);
-
-    //
-    // Verify the XDP offload API failed.
-    //
-    TEST_TRUE(FAILED(AsyncThread.get()));
 }
 
 /**

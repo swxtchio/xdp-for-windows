@@ -23,15 +23,8 @@
 #define ASSERT(e) NT_ASSERT_ASSUME(e)
 #endif
 #else
-#if __SANITIZE_ADDRESS__
-// Instead of asserting (which simply exits the process) generate an AV that ASAN will catch.
-#define ASSERT_ACTION ((*(UINT16 *)0xDEAD) = 0xDEAD)
-#endif
 #if DBG
-#ifndef ASSERT_ACTION
-#define ASSERT_ACTION DbgRaiseAssertionFailure()
-#endif
-#define ASSERT(e) ((e) ? TRUE : (ASSERT_ACTION, FALSE))
+#define ASSERT(e) ((e) ? TRUE : (DbgRaiseAssertionFailure(), FALSE))
 #elif defined(_PREFAST_)
 #define ASSERT(e) _Analysis_assume_(e)
 #else

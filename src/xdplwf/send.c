@@ -173,7 +173,6 @@ XdpGenericBuildTxNbl(
     NET_BUFFER_DATA_OFFSET(Nb) = 0;
     NET_BUFFER_CURRENT_MDL_OFFSET(Nb) = 0;
     NET_BUFFER_LIST_SET_HASH_VALUE(Nbl, TxQueue->RssQueue->RssHash);
-    NET_BUFFER_LIST_STATUS(Nbl) = NDIS_STATUS_SUCCESS;
     NblTxContext(Nbl)->TxQueue = TxQueue;
     NblTxContext(Nbl)->InjectionType = XDP_LWF_GENERIC_INJECTION_SEND;
     NblTxContext(Nbl)->BufferAddress = BufferMdl->MdlOffset;
@@ -219,21 +218,6 @@ XdpGenericCompleteTx(
                 XdpGetTxCompletionContextExtension(
                     Completion, &TxQueue->TxCompletionContextExtension);
             *CompletionContext = NblTxContext(Nbl)->CompletionContext;
-        }
-
-        //
-        // In lieu of calling MmPrepareMdlForReuse, assert our MDL did not get
-        // mapped by the memory manager: the original MDL should have been
-        // mapped by XDP itself, and the partial MDL inherited that mapping,
-        // precluding the need for it to be mapped by itself.
-        //
-        ASSERT(Nbl->FirstNetBuffer->Next == NULL);
-        ASSERT(Nbl->FirstNetBuffer->MdlChain->Next == NULL);
-        ASSERT(Nbl->FirstNetBuffer->MdlChain->MdlFlags & MDL_PARTIAL);
-        ASSERT((Nbl->FirstNetBuffer->MdlChain->MdlFlags & MDL_PARTIAL_HAS_BEEN_MAPPED) == 0);
-
-        if (Nbl->Status != NDIS_STATUS_SUCCESS) {
-            STAT_INC(&TxQueue->PcwStats, FramesDroppedNic);
         }
 
         // Return the NBL to the TX free list.
@@ -338,7 +322,6 @@ XdpGenericDropTx(
 {
     XDP_RING *FrameRing;
     XDP_RING *CompletionRing;
-    UINT32 Drops;
     CONST UINT32 MaxDrops = 1024;
 
     if (ReadPointerAcquire(&TxQueue->XdpTxQueue) == NULL) {
@@ -352,7 +335,7 @@ XdpGenericDropTx(
         XdpFlushTransmit(TxQueue->XdpTxQueue);
     }
 
-    for (Drops = 0; XdpRingCount(FrameRing) > 0 && Drops < MaxDrops; Drops++) {
+    for (UINT32 Drop = 0; XdpRingCount(FrameRing) > 0 && Drop < MaxDrops; Drop++) {
         XDP_FRAME *Frame;
         XDP_BUFFER *Buffer;
         XDP_BUFFER_MDL *BufferMdl;
@@ -386,8 +369,6 @@ XdpGenericDropTx(
     if (XdpRingCount(CompletionRing) > 0) {
         XdpFlushTransmit(TxQueue->XdpTxQueue);
     }
-
-    STAT_ADD(&TxQueue->PcwStats, FramesDroppedPause, Drops);
 
     return XdpRingCount(FrameRing) > 0;
 }
@@ -622,9 +603,6 @@ XdpGenericTxCreateQueue(
         .Direction  = XDP_HOOK_TX,
         .SubLayer   = XDP_HOOK_INJECT,
     };
-    DECLARE_UNICODE_STRING_SIZE(
-        Name, ARRAYSIZE("if_" MAXUINT32_STR "_queue_" MAXUINT32_STR "_rx"));
-    const WCHAR *DirectionString;
 
     RtlAcquirePushLockExclusive(&Generic->Lock);
 
@@ -658,13 +636,6 @@ XdpGenericTxCreateQueue(
         goto Exit;
     }
 
-    if (HookId.Direction == XDP_HOOK_RX) {
-        DirectionString = L"_rx";
-    } else {
-        ASSERT(HookId.Direction == XDP_HOOK_TX);
-        DirectionString = L"";
-    }
-
     if (Generic->Tx.Mtu == 0) {
         Status = STATUS_DEVICE_NOT_READY;
         goto Exit;
@@ -688,18 +659,6 @@ XdpGenericTxCreateQueue(
     PoolParams.ProtocolId = NDIS_PROTOCOL_ID_TCP_IP;
     PoolParams.PoolTag = POOLTAG_BUFFER;
     PoolParams.fAllocateNetBuffer = TRUE;
-
-    Status =
-        RtlUnicodeStringPrintf(
-            &Name, L"if_%u_queue_%u%s", Generic->IfIndex, QueueInfo->QueueId, DirectionString);
-    if (!NT_SUCCESS(Status)) {
-        goto Exit;
-    }
-
-    Status = XdpPcwCreateLwfTxQueue(&TxQueue->PcwInstance, &Name, &TxQueue->PcwStats);
-    if (!NT_SUCCESS(Status)) {
-        goto Exit;
-    }
 
     TxQueue->XdpNotifyHandle = XdpTxQueueGetNotifyHandle(Config);
     if (TxQueue->XdpNotifyHandle == NULL) {
@@ -836,9 +795,6 @@ Exit:
                 NdisFreeNetBufferListPool(TxQueue->NblPool);
                 TxQueue->NblPool = NULL;
             }
-            if (TxQueue->PcwInstance != NULL) {
-                PcwCloseInstance(TxQueue->PcwInstance);
-            }
             ExFreePoolWithTag(TxQueue, POOLTAG_SEND);
         }
     }
@@ -904,7 +860,6 @@ XdpGenericFreeTxQueue(
         CONTAINING_RECORD(Entry, XDP_LWF_GENERIC_TX_QUEUE, DeleteEntry);
 
     XdpEcCleanup(&TxQueue->Ec);
-    XdpPcwCloseLwfTxQueue(TxQueue->PcwInstance);
     KeSetEvent(TxQueue->DeleteComplete, 0, FALSE);
     ExFreePoolWithTag(TxQueue, POOLTAG_SEND);
 }

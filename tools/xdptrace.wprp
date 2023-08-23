@@ -11,10 +11,6 @@
             <Buffers Value="5" PercentageOfTotalMemory="true"/>
         </EventCollector>
 
-        <EventCollector Id="EC_HighVolume1GB" Name="High Volume (1GB limit)" Base="EC_HighVolume">
-            <Buffers Value="20" PercentageOfTotalMemory="true" MaximumBufferSpace="1024"/>
-        </EventCollector>
-
         <SystemProvider Id="SystemProviderCpu">
             <Keywords>
                 <Keyword Value="ProcessThread"/>
@@ -88,10 +84,6 @@
             </Keywords>
         </EventProvider>
 
-        <!-- Windows OS providers -->
-        <EventProvider Id="EP_MicrosoftWindowsTcpipPerPacket" Name="2F07E2EE-15DB-40F1-90EF-9D7BA282188A" Level="17" />
-        <EventProvider Id="EP_MicrosoftWindowsWinsockAfd" Name="E53C6823-7BB8-44BB-90DC-3F86090D48A" Level="5" />
-
         <Profile Id="XDP.Verbose.File" Name="XDP" Description="XDP" LoggingMode="File" DetailLevel="Verbose">
             <Collectors>
                 <EventCollectorId Value="EC_HighVolume">
@@ -114,9 +106,6 @@
                         <EventProviderId Value="EP_XdpFnMpWpp" />
                         <EventProviderId Value="EP_XdpFnLwfWpp" />
                         <EventProviderId Value="EP_XdpFnTestWpp" />
-
-                        <EventProviderId Value="EP_MicrosoftWindowsTcpipPerPacket" />
-                        <EventProviderId Value="EP_MicrosoftWindowsWinsockAfd" />
                     </EventProviders>
                 </EventCollectorId>
             </Collectors>
@@ -143,16 +132,6 @@
             DetailLevel = "Verbose"
             Name = "SpinXsk"
             Description = "XDP SpinXsk Stress Test"/>
-
-        <Profile Id="SpinXskEbpf.Verbose.Memory" Name="SpinXskEbpf" Description="XDP SpinXsk Stress Test (eBPF)" LoggingMode="Memory" DetailLevel="Verbose">
-            <Collectors>
-                <EventCollectorId Value="EC_HighVolume1GB">
-                    <EventProviders>
-                        <EventProviderId Value="EP_EbpfEtw" />
-                    </EventProviders>
-                </EventCollectorId>
-            </Collectors>
-        </Profile>
 
         <Profile Id="CpuCswitchSample.Verbose.File" Name="CpuCswitchSample" Description="CPU precise and sampled profile" LoggingMode="File" DetailLevel="Verbose">
             <Collectors>

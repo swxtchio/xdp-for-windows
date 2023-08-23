@@ -11,18 +11,14 @@
 #include <ntstatus.h>
 #include <ntifs.h>
 #include <ntintsafe.h>
-#include <ntstrsafe.h>
 #include <ndis.h>
 #include <ndis/ndl/nblqueue.h>
 #include <ndis/ndl/nblclassify.h>
 #include <netiodef.h>
-#include <qeo_ndis.h>
-#include <winerror.h>
 
 #define XDPEXPORT(RoutineName) RoutineName##Thunk
 
 #include <xdpapi.h>
-#include <xdpapi_experimental.h>
 
 #include <xdp/buffermdl.h>
 #include <xdp/buffervirtualaddress.h>
@@ -40,7 +36,6 @@
 #include <xdpif.h>
 #include <xdplifetime.h>
 #include <xdplwf.h>
-#include <xdppcw.h>
 #include <xdpregistry.h>
 #include <xdprtl.h>
 #include <xdprxqueue_internal.h>
@@ -48,13 +43,6 @@
 #include <xdptimer.h>
 #include <xdptxqueue_internal.h>
 #include <xdptrace.h>
-#include <xdpworkqueue.h>
-
-#ifndef NDIS_RUNTIME_VERSION_688
-#define NDIS_RUNTIME_VERSION_688 ((6 << 16) | 88)
-#else
-C_ASSERT(!"NDIS_RUNTIME_VERSION_688 has been publicly defined. Remove redundant definition.");
-#endif
 
 #pragma warning(disable:4200) // nonstandard extension used: zero-sized array in struct/union
 
@@ -65,8 +53,6 @@ C_ASSERT(!"NDIS_RUNTIME_VERSION_688 has been publicly defined. Remove redundant 
 #include "generic.h"
 #include "native.h"
 #include "offload.h"
-#include "offloadqeo.h"
-#include "offloadrss.h"
 #include "oid.h"
 #include "recv.h"
 #include "send.h"

@@ -8,18 +8,8 @@
 
 XDP for Windows consists of a usermode library (xdpapi.dll) and a driver (xdp.sys).
 
-### Install the Latest (1.x) Official
-
-```PowerShell
-Invoke-WebRequest https://aka.ms/xdp-v1.msi -OutFile xdp.msi
-msiexec /i xdp.msi /quiet
-```
-
-### Install a Test Version
-
 If xdp.sys is not production-signed:
-
-```bat
+```PowerShell
 CertUtil.exe -addstore Root CoreNetSignRoot.cer
 CertUtil.exe -addstore TrustedPublisher CoreNetSignRoot.cer
 bcdedit.exe /set testsigning on
@@ -27,20 +17,15 @@ bcdedit.exe /set testsigning on
 ```
 
 Install:
-
-```bat
-msiexec /i xdp-for-windows.msi /quiet
+```PowerShell
+netcfg.exe -l .\xdp.inf -c s -i ms_xdp
 ```
 
 Uninstall:
-
-```bat
-msiexec /x xdp-for-windows.msi /quiet
+```PowerShell
+netcfg.exe -u ms_xdp
+pnputil.exe /delete-driver xdp.inf
 ```
-
-### Version Upgrade
-
-To upgrade versions of XDP, uninstall the old version and install the new version. If processes have XDP handles open (e.g. sockets, programs) those handles need to be closed for uninstallation to complete.
 
 ## Logging
 
@@ -96,10 +81,6 @@ including in crash dumps, using the kernel debugger.
 !rcdrkd.rcdrlogdump xdp
 ```
 
-### Installer logging
-
-To collect XDP installer traces, append `/l*v filename.log` to the MSI command line.
-
 ## Configuration
 
 XDP is in a passive state upon installation. XDP can be configured via a set of
@@ -111,16 +92,6 @@ The number of XDP queues is determined by the number of RSS queues configured on
 a network interface. The XDP queue IDs are assigned [0, N-1] for an interface
 with N configured RSS queues. XDP programs and AF_XDP applications bind to RSS
 queues using this queue ID space.
-
-### XDP access control
-
-Access to XDP is restricted to `SYSTEM` and the built-in administrators group by default. The `xdpcfg.exe` tool can be used to add or remove privileges. For example, to grant access to `SYSTEM`, built-in administrators, and the user or group represented by the `S-1-5-21-1626206346-3338949459-3778528156-1001` SID:
-
-```PowerShell
-xdpcfg.exe SetDeviceSddl "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;S-1-5-21-1626206346-3338949459-3778528156-1001)"
-```
-
-The XDP driver must be restarted for these changes to take effect; the configuration is persistent across driver and machine restarts.
 
 ## AF_XDP
 

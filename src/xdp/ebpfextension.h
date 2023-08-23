@@ -36,11 +36,6 @@ EbpfExtensionClientGetDispatch(
     _In_ const EBPF_EXTENSION_CLIENT *Client
     );
 
-const ebpf_extension_program_dispatch_table_t *
-EbpfExtensionClientGetProgramDispatch(
-    _In_ const EBPF_EXTENSION_CLIENT *Client
-    );
-
 const VOID *
 EbpfExtensionClientGetClientContext(
     _In_ const EBPF_EXTENSION_CLIENT *Client

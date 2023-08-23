@@ -10,7 +10,9 @@
 typedef struct _XDP_PROGRAM XDP_PROGRAM;
 typedef struct _XDP_RX_QUEUE XDP_RX_QUEUE;
 
-typedef ebpf_execution_context_state_t XDP_INSPECTION_EBPF_CONTEXT;
+typedef struct _XDP_INSPECTION_EBPF_CONTEXT {
+    UINT64 Reserved[2];
+} XDP_INSPECTION_EBPF_CONTEXT;
 
 typedef struct _XDP_INSPECTION_CONTEXT {
     XDP_INSPECTION_EBPF_CONTEXT EbpfContext;

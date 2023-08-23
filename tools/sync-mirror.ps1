@@ -20,7 +20,7 @@ param (
 )
 
 Set-StrictMode -Version 'Latest'
-$ErrorActionPreference = 'Stop'
+$PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
 
 # Verify the PAT environmental variable is set.
 if ($null -eq $Env:AzDO_PAT -or "" -eq $Env:AzDO_PAT) {

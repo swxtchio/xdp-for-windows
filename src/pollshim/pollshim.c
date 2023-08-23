@@ -95,7 +95,7 @@ XdpPollStart(
     VOID
     )
 {
-#ifndef XDP_OFFICIAL_BUILD
+#if FNDIS
 
     NTSTATUS Status;
 
@@ -119,7 +119,7 @@ XdpPollStart(
 
 Exit:
 
-#endif
+#endif // FNDIS
 
     return STATUS_SUCCESS;
 }
