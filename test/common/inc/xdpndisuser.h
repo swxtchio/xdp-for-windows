@@ -9,6 +9,12 @@
 extern "C" {
 #endif
 
+typedef _Return_type_success_(return >= 0) int NDIS_STATUS;
+
+#define NDIS_STATUS_SUCCESS                     ((NDIS_STATUS)STATUS_SUCCESS)
+#define NDIS_STATUS_PENDING                     ((NDIS_STATUS)STATUS_PENDING)
+#define NDIS_STATUS_FAILURE                     ((NDIS_STATUS)STATUS_UNSUCCESSFUL)
+
 #include <xdpfnoid.h>
 
 #pragma warning(push)
@@ -20,7 +26,7 @@ extern "C" {
 #define OID_TCP_OFFLOAD_CURRENT_CONFIG          0xFC01020B  // query only, handled by NDIS
 #define OID_TCP_OFFLOAD_PARAMETERS              0xFC01020C  // set only
 #define OID_TCP_OFFLOAD_HARDWARE_CAPABILITIES   0xFC01020D  // query only
-
+#define OID_TCP_TASK_IPSEC_OFFLOAD_V2_UPDATE_SA 0xFC030204
 
 typedef ULONG NDIS_OID, *PNDIS_OID;
 

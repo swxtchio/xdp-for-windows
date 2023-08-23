@@ -36,6 +36,7 @@
 
 #pragma once
 
+#include <xdpapi.h>
 #include <xdp/control.h>
 #include <xdpifmode.h>
 
@@ -74,16 +75,6 @@ XDP_REMOVE_INTERFACE_COMPLETE(
     _In_ VOID *InterfaceContext
     );
 
-
-//
-// Completes an XDP interface set deletion.
-//
-typedef
-VOID
-XDP_DELETE_INTERFACE_SET_COMPLETE(
-    _In_ VOID *InterfaceContext
-    );
-
 //
 // Offload configuration.
 //
@@ -93,6 +84,7 @@ XDP_DELETE_INTERFACE_SET_COMPLETE(
 
 typedef enum {
     XdpOffloadRss,
+    XdpOffloadQeo,
 } XDP_INTERFACE_OFFLOAD_TYPE;
 
 typedef enum {
@@ -145,6 +137,16 @@ typedef struct _XDP_OFFLOAD_PARAMS_RSC {
     XDP_OFFLOAD_STATE Ipv4;
     XDP_OFFLOAD_STATE Ipv6;
 } XDP_OFFLOAD_PARAMS_RSC;
+
+typedef struct _XDP_OFFLOAD_PARAMS_QEO_CONNECTION {
+    LIST_ENTRY TransactionEntry;
+    XDP_QUIC_CONNECTION Params;
+} XDP_OFFLOAD_PARAMS_QEO_CONNECTION;
+
+typedef struct _XDP_OFFLOAD_PARAMS_QEO {
+    LIST_ENTRY Connections;
+    UINT32 ConnectionCount;
+} XDP_OFFLOAD_PARAMS_QEO;
 
 //
 // Open an interface queue offload configuration handle.
@@ -240,17 +242,6 @@ XDP_SET_INTERFACE_OFFLOAD(
     );
 
 //
-// References the current state of an offload on an interface. This ensures the
-// current state of that offload doesn't change.
-//
-typedef
-NTSTATUS
-XDP_REFERENCE_INTERFACE_OFFLOAD(
-    _In_ VOID *InterfaceOffloadHandle,
-    _In_ XDP_INTERFACE_OFFLOAD_TYPE OffloadType
-    );
-
-//
 // Close an interface offload configuration handle.
 // This reverts any offload configuration done or references added via the
 // handle.
@@ -270,7 +261,6 @@ typedef struct _XDP_OFFLOAD_DISPATCH {
     XDP_GET_INTERFACE_OFFLOAD_CAPABILITIES *GetInterfaceOffloadCapabilities;
     XDP_GET_INTERFACE_OFFLOAD *GetInterfaceOffload;
     XDP_SET_INTERFACE_OFFLOAD *SetInterfaceOffload;
-    XDP_REFERENCE_INTERFACE_OFFLOAD *ReferenceInterfaceOffload;
     XDP_CLOSE_INTERFACE_OFFLOAD_HANDLE *CloseInterfaceOffloadHandle;
 } XDP_OFFLOAD_DISPATCH;
 
@@ -314,12 +304,11 @@ XdpIfCreateInterfaceSet(
     _In_ NET_IFINDEX IfIndex,
     _In_ CONST XDP_OFFLOAD_DISPATCH *OffloadDispatch,
     _In_ VOID *InterfaceSetContext,
-    _In_ XDP_DELETE_INTERFACE_SET_COMPLETE *DeleteInterfaceSetComplete,
     _Out_ XDPIF_INTERFACE_SET_HANDLE *InterfaceSetHandle
     );
 
 //
-// Delete XDP interfaces.
+// Delete XDP interface set. The set must be empty.
 //
 _IRQL_requires_max_(PASSIVE_LEVEL)
 VOID

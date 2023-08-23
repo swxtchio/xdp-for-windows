@@ -171,7 +171,7 @@ StartServiceAsync(
 
     FRE_ASSERT(CloseServiceHandle(SvcHandle));
 
-    return S_OK;
+    return Result;
 }
 
 EXTERN_C
@@ -211,32 +211,4 @@ Exit:
     }
 
     return Result;
-}
-
-static BOOLEAN XdpPreinstalled = TRUE;
-
-EXTERN_C
-BOOLEAN
-XdpInstall()
-{
-    CHAR CmdBuff[256];
-
-    XdpPreinstalled = IsServiceInstalled(XDP_SERVICE_NAME);
-
-    RtlZeroMemory(CmdBuff, sizeof(CmdBuff));
-    sprintf_s(CmdBuff, "%s .\\xdp.ps1 -Install %s", GetPowershellPrefix(), XdpPreinstalled ? "-DriverPreinstalled" : "");
-    FRE_ASSERT(system(CmdBuff) == 0);
-    return TRUE;
-}
-
-EXTERN_C
-BOOLEAN
-XdpUninstall()
-{
-    CHAR CmdBuff[256];
-
-    sprintf_s(CmdBuff, "%s  .\\xdp.ps1 -Uninstall %s", GetPowershellPrefix(), XdpPreinstalled ? "-DriverPreinstalled" : "");
-    FRE_ASSERT(system(CmdBuff) == 0);
-    FRE_ASSERT(!IsServiceInstalled(XDP_SERVICE_NAME));
-    return TRUE;
 }

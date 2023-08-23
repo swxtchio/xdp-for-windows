@@ -5,6 +5,10 @@
 
 #pragma once
 
+#if USER_MODE
+#include <precomp.h>
+#else
+
 #pragma warning(disable:4201)  // nonstandard extension used: nameless struct/union
 
 #include <ntdef.h>
@@ -12,6 +16,8 @@
 #include <ntifs.h>
 #include <ntintsafe.h>
 #include <ndis.h>
+#include <wdmsec.h>
+
 //
 // The stdint.h header is included by eBPF headers, and stdint.h throws
 // warnings. Include it directly and suppress the warnings.
@@ -24,6 +30,9 @@
 #include <stdlib.h>
 #include <netiodef.h>
 #include <netioddk.h>
+#include <winerror.h>
+#include <ntstrsafe.h>
+#include <ebpf_extension.h>
 #include <ebpf_extension_uuids.h>
 #include <ebpf_nethooks.h>
 #include <ebpf_program_attach_type_guids.h>
@@ -47,11 +56,13 @@
 #include <xdp/txframecompletioncontext.h>
 
 #include <xdpapi.h>
+#include <xdpapi_experimental.h>
 #include <xdpassert.h>
 #include <xdpetw.h>
 #include <xdpif.h>
 #include <xdpioctl.h>
 #include <xdplwf.h>
+#include <xdppcw.h>
 #include <xdpnmrprovider.h>
 #include <xdppollshim.h>
 #include <xdprefcount.h>
@@ -59,6 +70,7 @@
 #include <xdprtl.h>
 #include <xdprxqueue_internal.h>
 #include <xdptrace.h>
+#include <xdptransport.h>
 #include <xdptxqueue_internal.h>
 #include <xdpversion.h>
 #include <xdpworkqueue.h>
@@ -71,6 +83,7 @@
 #include "ebpfextension.h"
 #include "extensionset.h"
 #include "offload.h"
+#include "offloadqeo.h"
 #include "program.h"
 #include "queue.h"
 #include "redirect.h"
@@ -78,3 +91,5 @@
 #include "rx.h"
 #include "tx.h"
 #include "xsk.h"
+
+#endif // USER_MODE

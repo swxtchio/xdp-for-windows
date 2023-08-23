@@ -22,7 +22,6 @@ CONST NDIS_OID MpSupportedOidArray[] =
     OID_GEN_VENDOR_DESCRIPTION,
     OID_GEN_CURRENT_PACKET_FILTER,
     OID_GEN_CURRENT_LOOKAHEAD,
-    OID_GEN_DRIVER_VERSION,
     OID_GEN_MAXIMUM_TOTAL_SIZE,
     OID_GEN_MAC_OPTIONS,
     OID_GEN_MEDIA_CONNECT_STATUS,
@@ -43,6 +42,8 @@ CONST NDIS_OID MpSupportedOidArray[] =
     OID_XDP_QUERY_CAPABILITIES,
     OID_TCP_OFFLOAD_PARAMETERS,
     OID_TCP_OFFLOAD_HW_PARAMETERS,
+    OID_QUIC_CONNECTION_ENCRYPTION,
+    OID_QUIC_CONNECTION_ENCRYPTION_PROTOTYPE,
 };
 
 CONST UINT32 MpSupportedOidArraySize = sizeof(MpSupportedOidArray);
@@ -50,32 +51,55 @@ CONST UINT32 MpSupportedOidArraySize = sizeof(MpSupportedOidArray);
 static PCSTR MpDriverFriendlyName = "XDPFNMP";
 
 static
+LIST_ENTRY *
+MpOidRequestToListEntry(
+    _In_ NDIS_OID_REQUEST *NdisRequest
+    )
+{
+    C_ASSERT(RTL_FIELD_SIZE(NDIS_OID_REQUEST, MiniportReserved) >= sizeof(LIST_ENTRY));
+    return (LIST_ENTRY *)NdisRequest->MiniportReserved;
+}
+
+static
+NDIS_OID_REQUEST *
+MpListEntryToOidRequest(
+    _In_ LIST_ENTRY *ListEntry
+    )
+{
+    return CONTAINING_RECORD(ListEntry, NDIS_OID_REQUEST, MiniportReserved);
+}
+
+static
 NDIS_STATUS
 MpFilterOid(
     _In_ ADAPTER_CONTEXT *Adapter,
+    _In_ OID_REQUEST_INTERFACE RequestInterface,
     _In_ NDIS_OID_REQUEST *NdisRequest
     )
 {
     NTSTATUS Status = NDIS_STATUS_SUCCESS;
+    KIRQL OldIrql;
 
     //
     // Pend the OID if we have a matching filter.
     //
 
-    RtlAcquirePushLockExclusive(&Adapter->Lock);
+    KeAcquireSpinLock(&Adapter->Lock, &OldIrql);
 
     for (UINT32 Index = 0; Index < Adapter->OidFilterKeyCount; Index++) {
         OID_KEY *Filter = &Adapter->OidFilterKeys[Index];
         if (NdisRequest->DATA.Oid == Filter->Oid &&
-            NdisRequest->RequestType == Filter->RequestType) {
-            ASSERT(Adapter->FilteredOidRequest == NULL);
-            Adapter->FilteredOidRequest = NdisRequest;
+            NdisRequest->RequestType == Filter->RequestType &&
+            RequestInterface == Filter->RequestInterface) {
+            InsertTailList(
+                &Adapter->FilteredOidRequestLists[RequestInterface],
+                MpOidRequestToListEntry(NdisRequest));
             Status = NDIS_STATUS_PENDING;
             break;
         }
     }
 
-    RtlReleasePushLockExclusive(&Adapter->Lock);
+    KeReleaseSpinLock(&Adapter->Lock, OldIrql);
 
     return Status;
 }
@@ -84,6 +108,7 @@ static
 NDIS_STATUS
 MpProcessQueryOid(
    _In_ ADAPTER_CONTEXT *Adapter,
+    _In_ OID_REQUEST_INTERFACE RequestInterface,
    _Inout_ NDIS_OID_REQUEST *NdisRequest,
    _In_ BOOLEAN ShouldFilter
    )
@@ -114,7 +139,7 @@ MpProcessQueryOid(
     Status = NDIS_STATUS_SUCCESS;
 
     if (ShouldFilter) {
-        Status = MpFilterOid(Adapter, NdisRequest);
+        Status = MpFilterOid(Adapter, RequestInterface, NdisRequest);
         if (Status != NDIS_STATUS_SUCCESS) {
             return Status;
         }
@@ -182,11 +207,6 @@ MpProcessQueryOid(
 
         case OID_GEN_CURRENT_PACKET_FILTER:
             Data = &Adapter->CurrentPacketFilter;
-            break;
-
-        case OID_GEN_DRIVER_VERSION:
-            DataLength = sizeof(USHORT);
-            LocalData = 0x650;
             break;
 
         case OID_GEN_MAC_OPTIONS:
@@ -317,6 +337,7 @@ static
 NDIS_STATUS
 MpProcessSetOid(
     _In_ ADAPTER_CONTEXT *Adapter,
+    _In_ OID_REQUEST_INTERFACE RequestInterface,
     _Inout_ NDIS_OID_REQUEST *NdisRequest,
     _In_ BOOLEAN ShouldFilter
     )
@@ -330,7 +351,7 @@ MpProcessSetOid(
     Status = NDIS_STATUS_SUCCESS;
 
     if (ShouldFilter) {
-        Status = MpFilterOid(Adapter, NdisRequest);
+        Status = MpFilterOid(Adapter, RequestInterface, NdisRequest);
         if (Status != NDIS_STATUS_SUCCESS) {
             return Status;
         }
@@ -480,6 +501,65 @@ MpProcessSetOid(
     return Status;
 }
 
+static
+NDIS_STATUS
+MpProcessMethodOid(
+    _In_ ADAPTER_CONTEXT *Adapter,
+    _In_ OID_REQUEST_INTERFACE RequestInterface,
+    _Inout_ NDIS_OID_REQUEST *NdisRequest,
+    _In_ BOOLEAN ShouldFilter
+    )
+{
+    NDIS_STATUS Status;
+    NDIS_OID Oid = NdisRequest->DATA.METHOD_INFORMATION.Oid;
+    VOID *DataBuffer = NdisRequest->DATA.METHOD_INFORMATION.InformationBuffer;
+    UINT32 InputBufferLength = NdisRequest->DATA.METHOD_INFORMATION.InputBufferLength;
+    UINT32 OutputBufferLength = NdisRequest->DATA.METHOD_INFORMATION.OutputBufferLength;
+    PUINT BytesRead = &NdisRequest->DATA.METHOD_INFORMATION.BytesRead;
+    PUINT BytesWritten = &NdisRequest->DATA.METHOD_INFORMATION.BytesWritten;
+
+    if (ShouldFilter) {
+        Status = MpFilterOid(Adapter, RequestInterface, NdisRequest);
+        if (Status != NDIS_STATUS_SUCCESS) {
+            return Status;
+        }
+    }
+
+    switch (Oid) {
+    case OID_QUIC_CONNECTION_ENCRYPTION:
+    case OID_QUIC_CONNECTION_ENCRYPTION_PROTOTYPE:
+    {
+        NDIS_QUIC_CONNECTION *Connection = DataBuffer;
+
+        if (InputBufferLength == 0 ||
+            InputBufferLength % sizeof(*Connection) != 0 ||
+            InputBufferLength != OutputBufferLength) {
+            Status = NDIS_STATUS_INVALID_PARAMETER;
+            goto Exit;
+        }
+
+        while (InputBufferLength > 0) {
+            Connection->Status = NDIS_STATUS_SUCCESS;
+            Connection++;
+            InputBufferLength -= sizeof(*Connection);
+        }
+
+        *BytesRead = InputBufferLength;
+        *BytesWritten = OutputBufferLength;
+        Status = NDIS_STATUS_SUCCESS;
+        break;
+    }
+
+    default:
+        Status = STATUS_NOT_SUPPORTED;
+        break;
+    }
+
+Exit:
+
+    return Status;
+}
+
 VOID
 MiniportCancelRequestHandler(
    _In_ NDIS_HANDLE MiniportAdapterContext,
@@ -504,65 +584,163 @@ MiniportRequestHandler(
     {
         case NdisRequestQueryInformation:
         case NdisRequestQueryStatistics:
-            return MpProcessQueryOid(Adapter, NdisRequest, TRUE);
+            return
+                MpProcessQueryOid(Adapter, OID_REQUEST_INTERFACE_REGULAR, NdisRequest, TRUE);
 
         case NdisRequestSetInformation:
-            return MpProcessSetOid(Adapter, NdisRequest, TRUE);
+            return
+                MpProcessSetOid(Adapter, OID_REQUEST_INTERFACE_REGULAR, NdisRequest, TRUE);
+
+        case NdisRequestMethod:
+            return
+                MpProcessMethodOid(Adapter, OID_REQUEST_INTERFACE_REGULAR, NdisRequest, TRUE);
     }
 
     return NDIS_STATUS_NOT_SUPPORTED;
 }
 
+_IRQL_requires_max_(DISPATCH_LEVEL)
+_Function_class_(MINIPORT_CANCEL_DIRECT_OID_REQUEST)
+VOID
+MiniportCancelDirectRequestHandler(
+   _In_ NDIS_HANDLE MiniportAdapterContext,
+   _In_ VOID *RequestId
+   )
+{
+    UNREFERENCED_PARAMETER(MiniportAdapterContext);
+    UNREFERENCED_PARAMETER(RequestId);
+}
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+_Function_class_(MINIPORT_DIRECT_OID_REQUEST)
+NDIS_STATUS
+MiniportDirectRequestHandler(
+   _In_ NDIS_HANDLE MiniportAdapterContext,
+    _In_ NDIS_OID_REQUEST *NdisRequest
+   )
+{
+    ADAPTER_CONTEXT *Adapter = (ADAPTER_CONTEXT *)MiniportAdapterContext;
+
+    switch (NdisRequest->RequestType)
+    {
+        case NdisRequestQueryInformation:
+        case NdisRequestQueryStatistics:
+            return
+                MpProcessQueryOid(Adapter, OID_REQUEST_INTERFACE_DIRECT, NdisRequest, TRUE);
+
+        case NdisRequestSetInformation:
+            return
+                MpProcessSetOid(Adapter, OID_REQUEST_INTERFACE_DIRECT, NdisRequest, TRUE);
+
+        case NdisRequestMethod:
+            return
+                MpProcessMethodOid(Adapter, OID_REQUEST_INTERFACE_DIRECT, NdisRequest, TRUE);
+    }
+
+    return NDIS_STATUS_NOT_SUPPORTED;
+}
+
+static
 _IRQL_requires_max_(PASSIVE_LEVEL)
 VOID
 MpOidCompleteRequest(
-    _In_ ADAPTER_CONTEXT *Adapter
+    _In_ ADAPTER_CONTEXT *Adapter,
+    _In_ OID_REQUEST_INTERFACE RequestInterface,
+    _In_ NDIS_STATUS Status,
+    _In_ NDIS_OID_REQUEST *Request
     )
 {
-    NDIS_STATUS Status;
-    NDIS_OID_REQUEST *Request;
-
-    RtlAcquirePushLockExclusive(&Adapter->Lock);
-    Request = Adapter->FilteredOidRequest;
-    Adapter->FilteredOidRequest = NULL;
-    RtlReleasePushLockExclusive(&Adapter->Lock);
-
-    if (Request == NULL) {
-        return;
+    //
+    // The caller can specify either a valid NDIS OID completion status or
+    // NDIS_STATUS_PENDING. All valid completion statuses bypass the miniport
+    // OID processing routines; the pending status causes regular processing to
+    // continue.
+    //
+    if (Status != NDIS_STATUS_PENDING) {
+        goto Exit;
     }
 
     switch (Request->RequestType)
     {
         case NdisRequestQueryInformation:
         case NdisRequestQueryStatistics:
-            Status = MpProcessQueryOid(Adapter, Request, FALSE);
+            Status = MpProcessQueryOid(Adapter, RequestInterface, Request, FALSE);
             break;
         case NdisRequestSetInformation:
-            Status = MpProcessSetOid(Adapter, Request, FALSE);
+            Status = MpProcessSetOid(Adapter, RequestInterface, Request, FALSE);
+            break;
+        case NdisRequestMethod:
+            Status = MpProcessMethodOid(Adapter, RequestInterface, Request, FALSE);
             break;
         default:
             Status = NDIS_STATUS_NOT_SUPPORTED;
             break;
     }
 
-    NdisMOidRequestComplete(Adapter->MiniportHandle, Request, Status);
+Exit:
+
+    switch (RequestInterface) {
+    case OID_REQUEST_INTERFACE_REGULAR:
+        NdisMOidRequestComplete(Adapter->MiniportHandle, Request, Status);
+        break;
+
+    case OID_REQUEST_INTERFACE_DIRECT:
+        NdisMDirectOidRequestComplete(Adapter->MiniportHandle, Request, Status);
+        break;
+
+    default:
+        FRE_ASSERT(FALSE);
+        break;
+    }
 }
 
-_IRQL_requires_max_(PASSIVE_LEVEL)
+static
+_Requires_lock_held_(Adapter->Lock)
 VOID
 MpOidClearFilter(
     _In_ ADAPTER_CONTEXT *Adapter
     )
 {
-    RtlAcquirePushLockExclusive(&Adapter->Lock);
-
     if (Adapter->OidFilterKeys != NULL) {
         ExFreePoolWithTag(Adapter->OidFilterKeys, POOLTAG_OID);
         Adapter->OidFilterKeys = NULL;
         Adapter->OidFilterKeyCount = 0;
     }
+}
 
-    RtlReleasePushLockExclusive(&Adapter->Lock);
+_IRQL_requires_max_(PASSIVE_LEVEL)
+VOID
+MpOidClearFilterAndFlush(
+    _In_ ADAPTER_CONTEXT *Adapter
+    )
+{
+    KIRQL OldIrql;
+    LIST_ENTRY RequestLists[OID_REQUEST_INTERFACE_MAX];
+
+    //
+    // Atomically clear the OID filter conditions and complete any pended OIDs.
+    //
+
+    KeAcquireSpinLock(&Adapter->Lock, &OldIrql);
+
+    MpOidClearFilter(Adapter);
+
+    for (OID_REQUEST_INTERFACE Interface = 0; Interface < OID_REQUEST_INTERFACE_MAX; Interface++) {
+        InitializeListHead(&RequestLists[Interface]);
+        AppendTailList(&RequestLists[Interface], &Adapter->FilteredOidRequestLists[Interface]);
+        RemoveEntryList(&Adapter->FilteredOidRequestLists[Interface]);
+        InitializeListHead(&Adapter->FilteredOidRequestLists[Interface]);
+    }
+
+    KeReleaseSpinLock(&Adapter->Lock, OldIrql);
+
+    for (OID_REQUEST_INTERFACE Interface = 0; Interface < OID_REQUEST_INTERFACE_MAX; Interface++) {
+        while (!IsListEmpty(&RequestLists[Interface])) {
+            LIST_ENTRY *ListEntry = RemoveHeadList(&RequestLists[Interface]);
+            MpOidCompleteRequest(
+                Adapter, Interface, NDIS_STATUS_PENDING, MpListEntryToOidRequest(ListEntry));
+        }
+    }
 }
 
 _IRQL_requires_max_(PASSIVE_LEVEL)
@@ -576,6 +754,7 @@ MpIrpOidSetFilter(
     NTSTATUS Status;
     OID_KEY *Keys;
     UINT32 KeyCount;
+    KIRQL OldIrql = PASSIVE_LEVEL;
     BOOLEAN IsLockHeld = FALSE;
 
     if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(*Adapter->OidFilterKeys)) {
@@ -594,13 +773,19 @@ MpIrpOidSetFilter(
     for (UINT32 Index = 0; Index < KeyCount; Index++) {
         OID_KEY *Key = &Keys[Index];
         if (Key->RequestType != NdisRequestQueryInformation &&
-            Key->RequestType != NdisRequestSetInformation) {
+            Key->RequestType != NdisRequestSetInformation &&
+            Key->RequestType != NdisRequestMethod) {
+            Status = STATUS_INVALID_PARAMETER;
+            goto Exit;
+        }
+
+        if ((UINT32)Key->RequestInterface >= (UINT32)OID_REQUEST_INTERFACE_MAX) {
             Status = STATUS_INVALID_PARAMETER;
             goto Exit;
         }
     }
 
-    RtlAcquirePushLockExclusive(&Adapter->Lock);
+    KeAcquireSpinLock(&Adapter->Lock, &OldIrql);
     IsLockHeld = TRUE;
 
     if (Adapter->OidFilterKeys != NULL) {
@@ -626,10 +811,33 @@ MpIrpOidSetFilter(
 Exit:
 
     if (IsLockHeld) {
-        RtlReleasePushLockExclusive(&Adapter->Lock);
+        KeReleaseSpinLock(&Adapter->Lock, OldIrql);
     }
 
     return Status;
+}
+
+static
+NDIS_OID_REQUEST *
+MpOidFindFilteredOidByKey(
+    _In_ ADAPTER_CONTEXT *Adapter,
+    _In_ const OID_KEY *Key
+    )
+{
+    NDIS_OID_REQUEST *Request;
+
+    if (IsListEmpty(&Adapter->FilteredOidRequestLists[Key->RequestInterface])) {
+        return NULL;
+    }
+
+    Request =
+        MpListEntryToOidRequest(Adapter->FilteredOidRequestLists[Key->RequestInterface].Flink);
+
+    if (Request->DATA.Oid != Key->Oid || Request->RequestType != Key->RequestType) {
+        return NULL;
+    }
+
+    return Request;
 }
 
 _IRQL_requires_max_(PASSIVE_LEVEL)
@@ -645,6 +853,7 @@ MpIrpOidGetRequest(
     OID_GET_REQUEST_IN *In;
     VOID *InformationBuffer;
     UINT32 InformationBufferLength;
+    KIRQL OldIrql = PASSIVE_LEVEL;
     BOOLEAN IsLockHeld = FALSE;
     UINT32 OutputBufferLength =
         IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
@@ -659,30 +868,32 @@ MpIrpOidGetRequest(
 
     In = (OID_GET_REQUEST_IN *)Irp->AssociatedIrp.SystemBuffer;
 
-    RtlAcquirePushLockExclusive(&Adapter->Lock);
+    if ((UINT32)In->Key.RequestInterface >= (UINT32)OID_REQUEST_INTERFACE_MAX) {
+        Status = STATUS_INVALID_PARAMETER;
+        goto Exit;
+    }
+
+    KeAcquireSpinLock(&Adapter->Lock, &OldIrql);
     IsLockHeld = TRUE;
 
-    Request = Adapter->FilteredOidRequest;
-
+    Request = MpOidFindFilteredOidByKey(Adapter, &In->Key);
     if (Request == NULL) {
         Status = STATUS_NOT_FOUND;
         goto Exit;
     }
 
-    if (Request->DATA.Oid != In->Key.Oid || Request->RequestType != In->Key.RequestType) {
-        Status = STATUS_NOT_FOUND;
-        goto Exit;
-    }
-
     if (Request->RequestType == NdisRequestQueryInformation) {
-        InformationBuffer = Request->DATA.SET_INFORMATION.InformationBuffer;
-        InformationBufferLength = Request->DATA.SET_INFORMATION.InformationBufferLength;
-    } else if (Request->RequestType == NdisRequestSetInformation) {
         InformationBuffer = Request->DATA.QUERY_INFORMATION.InformationBuffer;
         InformationBufferLength = Request->DATA.QUERY_INFORMATION.InformationBufferLength;
+    } else if (Request->RequestType == NdisRequestSetInformation) {
+        InformationBuffer = Request->DATA.SET_INFORMATION.InformationBuffer;
+        InformationBufferLength = Request->DATA.SET_INFORMATION.InformationBufferLength;
+    } else if (Request->RequestType == NdisRequestMethod) {
+        InformationBuffer = Request->DATA.METHOD_INFORMATION.InformationBuffer;
+        InformationBufferLength = Request->DATA.METHOD_INFORMATION.InputBufferLength;
     } else {
         //
-        // We only should have filtered get/set requests.
+        // We only should have filtered get/set/method requests.
         //
         ASSERT(FALSE);
         Status = STATUS_NOT_SUPPORTED;
@@ -707,8 +918,114 @@ MpIrpOidGetRequest(
 Exit:
 
     if (IsLockHeld) {
-        RtlReleasePushLockExclusive(&Adapter->Lock);
+        KeReleaseSpinLock(&Adapter->Lock, OldIrql);
     }
+
+    return Status;
+}
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+NTSTATUS
+MpIrpOidCompleteRequest(
+    _In_ ADAPTER_CONTEXT *Adapter,
+    _In_ IRP *Irp,
+    _In_ IO_STACK_LOCATION *IrpSp
+    )
+{
+    NTSTATUS Status;
+    NDIS_OID_REQUEST *Request = NULL;
+    const OID_COMPLETE_REQUEST_IN *In = NULL;
+    BOUNCE_BUFFER InfoBuffer;
+    VOID *InformationBuffer = NULL;
+    UINT32 InformationBufferLength = 0;
+    UINT *BytesWritten = NULL;
+    KIRQL OldIrql = PASSIVE_LEVEL;
+    BOOLEAN IsLockHeld = FALSE;
+
+    BounceInitialize(&InfoBuffer);
+
+    if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(*In)) {
+        Status = STATUS_INVALID_PARAMETER;
+        goto Exit;
+    }
+
+    In = (const OID_COMPLETE_REQUEST_IN *)Irp->AssociatedIrp.SystemBuffer;
+
+    if ((UINT32)In->Key.RequestInterface >= (UINT32)OID_REQUEST_INTERFACE_MAX) {
+        Status = STATUS_INVALID_PARAMETER;
+        goto Exit;
+    }
+
+    if (In->Status == NDIS_STATUS_PENDING && In->InformationBufferLength > 0) {
+        Status = STATUS_INVALID_PARAMETER;
+        goto Exit;
+    }
+
+    Status =
+        BounceBuffer(
+            &InfoBuffer, In->InformationBuffer, In->InformationBufferLength, __alignof(UCHAR));
+    if (!NT_SUCCESS(Status)) {
+        goto Exit;
+    }
+
+    KeAcquireSpinLock(&Adapter->Lock, &OldIrql);
+    IsLockHeld = TRUE;
+
+    Request = MpOidFindFilteredOidByKey(Adapter, &In->Key);
+    if (Request == NULL) {
+        Status = STATUS_NOT_FOUND;
+        goto Exit;
+    }
+
+    if (Request->RequestType == NdisRequestQueryInformation) {
+        InformationBuffer = Request->DATA.QUERY_INFORMATION.InformationBuffer;
+        InformationBufferLength = Request->DATA.QUERY_INFORMATION.InformationBufferLength;
+        BytesWritten = &Request->DATA.QUERY_INFORMATION.BytesWritten;
+    } else if (Request->RequestType == NdisRequestSetInformation) {
+        //
+        // No output buffers.
+        //
+    } else if (Request->RequestType == NdisRequestMethod) {
+        InformationBuffer = Request->DATA.METHOD_INFORMATION.InformationBuffer;
+        InformationBufferLength = Request->DATA.METHOD_INFORMATION.OutputBufferLength;
+        BytesWritten = &Request->DATA.METHOD_INFORMATION.BytesWritten;
+    } else {
+        //
+        // We only should have filtered get/set/method requests.
+        //
+        ASSERT(FALSE);
+        Status = STATUS_NOT_SUPPORTED;
+        goto Exit;
+    }
+
+    if (InformationBufferLength < In->InformationBufferLength) {
+        Status = STATUS_BUFFER_TOO_SMALL;
+        goto Exit;
+    }
+
+    RemoveEntryList(MpOidRequestToListEntry(Request));
+    Status = STATUS_SUCCESS;
+
+Exit:
+
+    if (IsLockHeld) {
+        KeReleaseSpinLock(&Adapter->Lock, OldIrql);
+    }
+
+    if (NT_SUCCESS(Status)) {
+        ASSERT(Request != NULL);
+
+        if (In->InformationBufferLength > 0) {
+            ASSERT(In->Status != NDIS_STATUS_PENDING);
+
+            RtlCopyMemory(InformationBuffer, InfoBuffer.Buffer, In->InformationBufferLength);
+            *BytesWritten = In->InformationBufferLength;
+        }
+
+        MpOidCompleteRequest(Adapter, In->Key.RequestInterface, In->Status, Request);
+    }
+
+    BounceCleanup(&InfoBuffer);
 
     return Status;
 }

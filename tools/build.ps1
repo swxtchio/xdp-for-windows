@@ -9,7 +9,10 @@ param (
 
     [ValidateSet("Debug", "Release")]
     [Parameter(Mandatory=$false)]
-    [string]$Flavor = "Debug",
+    [string]$Config = "Debug",
+
+    [Parameter(Mandatory=$false)]
+    [string]$Project = "",
 
     [Parameter(Mandatory = $false)]
     [switch]$NoClean = $false,
@@ -18,56 +21,75 @@ param (
     [switch]$NoSign = $false,
 
     [Parameter(Mandatory = $false)]
+    [switch]$NoInstaller = $false,
+
+    [Parameter(Mandatory = $false)]
     [switch]$DevKit = $false,
 
     [Parameter(Mandatory = $false)]
-    [switch]$RuntimeKit = $false,
+    [switch]$TestArchive = $false,
 
     [Parameter(Mandatory = $false)]
     [switch]$UpdateDeps = $false
 )
 
 Set-StrictMode -Version 'Latest'
-$PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
+$ErrorActionPreference = 'Stop'
 
-$Tasks = @("Build")
-if (!$NoClean) {
-    $Tasks = @("Clean") + $Tasks
+$RootDir = Split-Path $PSScriptRoot -Parent
+
+$Tasks = @()
+if ([string]::IsNullOrEmpty($Project)) {
+    $Tasks += "Build"
+
+    if (!$NoClean) {
+        $Tasks = @("Clean") + $Tasks
+    }
+} else {
+    $Clean = ""
+    if (!$NoClean) {
+        $Clean = ":Rebuild"
+    }
+    $Tasks += "$Project$Clean"
+    $NoSign = $true
+    $NoInstaller = $true
 }
 
-tools/prepare-machine.ps1 -ForBuild -Force:$UpdateDeps
+& $RootDir\tools\prepare-machine.ps1 -ForBuild -Force:$UpdateDeps
 
-msbuild.exe xdp.sln `
+msbuild.exe $RootDir\xdp.sln `
     /t:restore `
     /p:RestorePackagesConfig=true `
     /p:RestoreConfigFile=src\nuget.config `
-    /p:Configuration=$Flavor `
+    /p:Configuration=$Config `
     /p:Platform=$Platform
 if (!$?) {
-    Write-Verbose "Restoring NuGet packages failed: $LastExitCode"
-    return
+    Write-Error "Restoring NuGet packages failed: $LastExitCode"
 }
 
-tools/prepare-machine.ps1 -ForEbpfBuild
+& $RootDir\tools\prepare-machine.ps1 -ForEbpfBuild
 
-msbuild.exe xdp.sln `
-    /p:Configuration=$Flavor `
+msbuild.exe $RootDir\xdp.sln `
+    /p:Configuration=$Config `
     /p:Platform=$Platform `
     /t:$($Tasks -join ",") `
     /maxCpuCount
 if (!$?) {
-    Write-Verbose "Build failed: $LastExitCode"
-    return
+    Write-Error "Build failed: $LastExitCode"
 }
 
 if (!$NoSign) {
-    tools/sign.ps1 -Config $Flavor -Arch $Platform
+    & $RootDir\tools\sign.ps1 -Config $Config -Arch $Platform
+}
+
+if (!$NoInstaller) {
+    & $RootDir\tools\create-installer.ps1 -Config $Config -Platform $Platform
 }
 
 if ($DevKit) {
-    tools/create-devkit.ps1 -Flavor $Flavor
+    & $RootDir\tools\create-devkit.ps1 -Config $Config
 }
 
-if ($RuntimeKit) {
-    tools/create-runtime-kit.ps1 -Flavor $Flavor
+if ($TestArchive) {
+    & $RootDir\tools\create-test-archive.ps1 -Config $Config
 }

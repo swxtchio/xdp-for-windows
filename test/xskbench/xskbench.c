@@ -246,19 +246,19 @@ PrintRing(
     XSK_RING_INFO RingInfo
     )
 {
-    if (RingInfo.size != 0) {
+    if (RingInfo.Size != 0) {
         printf_verbose(
             "%s\tring:\n\tva=0x%p\n\tsize=%d\n\tdescriptorsOff=%d\n\t"
             "producerIndexOff=%d(%lu)\n\tconsumerIndexOff=%d(%lu)\n\t"
             "flagsOff=%d(%lu)\n\telementStride=%d\n",
-            Name, RingInfo.ring, RingInfo.size, RingInfo.descriptorsOffset,
-            RingInfo.producerIndexOffset,
-            *(UINT32*)(RingInfo.ring + RingInfo.producerIndexOffset),
-            RingInfo.consumerIndexOffset,
-            *(UINT32*)(RingInfo.ring + RingInfo.consumerIndexOffset),
-            RingInfo.flagsOffset,
-            *(UINT32*)(RingInfo.ring + RingInfo.flagsOffset),
-            RingInfo.elementStride);
+            Name, RingInfo.Ring, RingInfo.Size, RingInfo.DescriptorsOffset,
+            RingInfo.ProducerIndexOffset,
+            *(UINT32*)(RingInfo.Ring + RingInfo.ProducerIndexOffset),
+            RingInfo.ConsumerIndexOffset,
+            *(UINT32*)(RingInfo.Ring + RingInfo.ConsumerIndexOffset),
+            RingInfo.FlagsOffset,
+            *(UINT32*)(RingInfo.Ring + RingInfo.FlagsOffset),
+            RingInfo.ElementStride);
     }
 }
 
@@ -267,10 +267,10 @@ PrintRingInfo(
     XSK_RING_INFO_SET InfoSet
     )
 {
-    PrintRing("rx", InfoSet.rx);
-    PrintRing("tx", InfoSet.tx);
-    PrintRing("fill", InfoSet.fill);
-    PrintRing("comp", InfoSet.completion);
+    PrintRing("rx", InfoSet.Rx);
+    PrintRing("tx", InfoSet.Tx);
+    PrintRing("fill", InfoSet.Fill);
+    PrintRing("comp", InfoSet.Completion);
 }
 
 VOID
@@ -402,23 +402,23 @@ SetupSock(
 
     printf_verbose("XDP_UMEM_REG\n");
 
-    Queue->umemReg.chunkSize = Queue->umemchunksize;
-    Queue->umemReg.headroom = Queue->umemheadroom;
-    Queue->umemReg.totalSize = Queue->umemsize;
+    Queue->umemReg.ChunkSize = Queue->umemchunksize;
+    Queue->umemReg.Headroom = Queue->umemheadroom;
+    Queue->umemReg.TotalSize = Queue->umemsize;
 
     if (largePages) {
         //
         // The memory subsystem requires allocations and mappings be aligned to
         // the large page size. XDP ignores the final chunk, if truncated.
         //
-        Queue->umemReg.totalSize = ALIGN_UP_BY(Queue->umemReg.totalSize, GetLargePageMinimum());
+        Queue->umemReg.TotalSize = ALIGN_UP_BY(Queue->umemReg.TotalSize, GetLargePageMinimum());
     }
 
-    Queue->umemReg.address =
+    Queue->umemReg.Address =
         VirtualAlloc(
-            NULL, Queue->umemReg.totalSize,
+            NULL, Queue->umemReg.TotalSize,
             (largePages ? MEM_LARGE_PAGES : 0) | MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    ASSERT_FRE(Queue->umemReg.address != NULL);
+    ASSERT_FRE(Queue->umemReg.Address != NULL);
 
     res =
         XdpApi->XskSetSockopt(
@@ -504,14 +504,14 @@ SetupSock(
     ASSERT_FRE(ringInfoSize == sizeof(infoSet));
     PrintRingInfo(infoSet);
 
-    XskRingInitialize(&Queue->fillRing, &infoSet.fill);
-    XskRingInitialize(&Queue->compRing, &infoSet.completion);
+    XskRingInitialize(&Queue->fillRing, &infoSet.Fill);
+    XskRingInitialize(&Queue->compRing, &infoSet.Completion);
 
     if (Queue->flags.rx) {
-        XskRingInitialize(&Queue->rxRing, &infoSet.rx);
+        XskRingInitialize(&Queue->rxRing, &infoSet.Rx);
     }
     if (Queue->flags.tx) {
-        XskRingInitialize(&Queue->txRing, &infoSet.tx);
+        XskRingInitialize(&Queue->txRing, &infoSet.Tx);
     }
 
     res =
@@ -535,13 +535,13 @@ SetupSock(
     ASSERT_FRE(FreeRingLayout != NULL);
 
     XSK_RING_INFO freeRingInfo = {0};
-    freeRingInfo.ring = (BYTE *)FreeRingLayout;
-    freeRingInfo.producerIndexOffset = (UINT32)STRUCT_FIELD_OFFSET(FreeRingLayout, Producer);
-    freeRingInfo.consumerIndexOffset = (UINT32)STRUCT_FIELD_OFFSET(FreeRingLayout, Consumer);
-    freeRingInfo.flagsOffset = (UINT32)STRUCT_FIELD_OFFSET(FreeRingLayout, Flags);
-    freeRingInfo.descriptorsOffset = (UINT32)STRUCT_FIELD_OFFSET(FreeRingLayout, Descriptors[0]);
-    freeRingInfo.size = numDescriptors;
-    freeRingInfo.elementStride = sizeof(*FreeRingLayout->Descriptors);
+    freeRingInfo.Ring = (BYTE *)FreeRingLayout;
+    freeRingInfo.ProducerIndexOffset = (UINT32)STRUCT_FIELD_OFFSET(FreeRingLayout, Producer);
+    freeRingInfo.ConsumerIndexOffset = (UINT32)STRUCT_FIELD_OFFSET(FreeRingLayout, Consumer);
+    freeRingInfo.FlagsOffset = (UINT32)STRUCT_FIELD_OFFSET(FreeRingLayout, Flags);
+    freeRingInfo.DescriptorsOffset = (UINT32)STRUCT_FIELD_OFFSET(FreeRingLayout, Descriptors[0]);
+    freeRingInfo.Size = numDescriptors;
+    freeRingInfo.ElementStride = sizeof(*FreeRingLayout->Descriptors);
     XskRingInitialize(&Queue->freeRing, &freeRingInfo);
     PrintRing("free", freeRingInfo);
 
@@ -552,7 +552,7 @@ SetupSock(
 
         if (mode == ModeTx || mode == ModeLat) {
             memcpy(
-                (UCHAR *)Queue->umemReg.address + desc + Queue->umemheadroom, Queue->txPattern,
+                (UCHAR *)Queue->umemReg.Address + desc + Queue->umemheadroom, Queue->txPattern,
                 Queue->txPatternLength);
         }
 
@@ -618,14 +618,14 @@ ProcessPeriodicStats(
         ASSERT_FRE(res == S_OK);
         ASSERT_FRE(optSize == sizeof(stats));
 
-        rxDropDiff = stats.rxDropped - Queue->lastRxDropCount;
+        rxDropDiff = stats.RxDropped - Queue->lastRxDropCount;
         rxDropKpps = rxDropDiff ? (double)rxDropDiff / tickDiff : 0;
-        Queue->lastRxDropCount = stats.rxDropped;
+        Queue->lastRxDropCount = stats.RxDropped;
 
         printf("%s[%d]: %9.3f kpps %9.3f rxDropKpps rxDrop:%llu rxTrunc:%llu "
             "rxBadDesc:%llu txBadDesc:%llu pokesAvoided:%llu%%\n",
-            modestr, Queue->queueId, kpps, rxDropKpps, stats.rxDropped, stats.rxTruncated,
-            stats.rxInvalidDescriptors, stats.txInvalidDescriptors,
+            modestr, Queue->queueId, kpps, rxDropKpps, stats.RxDropped, stats.RxTruncated,
+            stats.RxInvalidDescriptors, stats.TxInvalidDescriptors,
             pokesAvoidedPercentage);
 
         Queue->lastPokesRequestedCount = pokesRequested;
@@ -837,10 +837,9 @@ ReadRxPackets(
         XSK_BUFFER_DESCRIPTOR *rxDesc = XskRingGetElement(&Queue->rxRing, RxConsumerIndex++);
         UINT64 *freeDesc = XskRingGetElement(&Queue->freeRing, FreeProducerIndex++);
 
-        *freeDesc = XskDescriptorGetAddress(rxDesc->address);
-        printf_verbose("Consuming RX entry   {address:%llu, offset:%u, length:%d}\n",
-            XskDescriptorGetAddress(rxDesc->address), XskDescriptorGetOffset(rxDesc->address),
-            rxDesc->length);
+        *freeDesc = rxDesc->Address.BaseAddress;
+        printf_verbose("Consuming RX entry   {address:%llu, offset:%llu, length:%d}\n",
+            rxDesc->Address.BaseAddress, rxDesc->Address.Offset, rxDesc->Length);
     }
 }
 
@@ -943,16 +942,15 @@ WriteTxPackets(
         UINT64 *freeDesc = XskRingGetElement(&Queue->freeRing, FreeConsumerIndex++);
         XSK_BUFFER_DESCRIPTOR *txDesc = XskRingGetElement(&Queue->txRing, TxProducerIndex++);
 
-        txDesc->address = *freeDesc;
-        assert(Queue->umemReg.headroom <= MAXUINT16);
-        XskDescriptorSetOffset(&txDesc->address, (UINT16)Queue->umemReg.headroom);
-        txDesc->length = Queue->txiosize;
+        txDesc->Address.BaseAddress = *freeDesc;
+        assert(Queue->umemReg.Headroom <= MAXUINT16);
+        txDesc->Address.Offset = (UINT16)Queue->umemReg.Headroom;
+        txDesc->Length = Queue->txiosize;
         //
         // This benchmark does not write data into the TX packet.
         //
-        printf_verbose("Producing TX entry {address:%llu, offset:%u, length:%d}\n",
-            XskDescriptorGetAddress(txDesc->address), XskDescriptorGetOffset(txDesc->address),
-            txDesc->length);
+        printf_verbose("Producing TX entry {address:%llu, offset:%llu, length:%d}\n",
+            txDesc->Address.BaseAddress, txDesc->Address.Offset, txDesc->Length);
     }
 }
 
@@ -997,7 +995,7 @@ ProcessTx(
         Queue->packetCount += available;
 
         if (XskRingProducerReserve(&Queue->txRing, MAXUINT32, &producerIndex) !=
-                Queue->txRing.size) {
+                Queue->txRing.Size) {
             notifyFlags |= XSK_NOTIFY_FLAG_POKE_TX;
         }
     }
@@ -1089,28 +1087,27 @@ ProcessFwd(
             XSK_BUFFER_DESCRIPTOR *rxDesc = XskRingGetElement(&Queue->rxRing, consumerIndex++);
             XSK_BUFFER_DESCRIPTOR *txDesc = XskRingGetElement(&Queue->txRing, producerIndex++);
 
-            printf_verbose("Consuming RX entry   {address:%llu, offset:%u, length:%d}\n",
-                XskDescriptorGetAddress(rxDesc->address), XskDescriptorGetOffset(rxDesc->address), rxDesc->length);
+            printf_verbose("Consuming RX entry   {address:%llu, offset:%llu, length:%d}\n",
+                rxDesc->Address.BaseAddress, rxDesc->Address.Offset, rxDesc->Length);
 
-            txDesc->address = rxDesc->address;
-            txDesc->length = rxDesc->length;
+            txDesc->Address = rxDesc->Address;
+            txDesc->Length = rxDesc->Length;
 
             if (Queue->flags.rxInject == Queue->flags.txInspect) {
                 //
                 // Swap MAC addresses.
                 //
                 CHAR *ethHdr =
-                    (CHAR*)Queue->umemReg.address +
-                    XskDescriptorGetAddress(txDesc->address) +
-                    XskDescriptorGetOffset(txDesc->address);
+                    (CHAR*)Queue->umemReg.Address + txDesc->Address.BaseAddress +
+                        txDesc->Address.Offset;
                 CHAR tmp[6];
                 memcpy(tmp, ethHdr, sizeof(tmp));
                 memcpy(ethHdr, ethHdr + 6, sizeof(tmp));
                 memcpy(ethHdr + 6, tmp, sizeof(tmp));
             }
 
-            printf_verbose("Producing TX entry {address:%llu, offset:%u, length:%d}\n",
-                XskDescriptorGetAddress(txDesc->address), XskDescriptorGetOffset(txDesc->address), txDesc->length);
+            printf_verbose("Producing TX entry {address:%llu, offset:%llu, length:%d}\n",
+                txDesc->Address.BaseAddress, txDesc->Address.Offset, txDesc->Length);
         }
 
         XskRingConsumerRelease(&Queue->rxRing, available);
@@ -1143,7 +1140,7 @@ ProcessFwd(
         Queue->packetCount += available;
 
         if (XskRingProducerReserve(&Queue->txRing, MAXUINT32, &producerIndex) !=
-                Queue->txRing.size) {
+                Queue->txRing.Size) {
             notifyFlags |= XSK_NOTIFY_FLAG_POKE_TX;
         }
     }
@@ -1253,13 +1250,13 @@ ProcessLat(
             UINT64 *fillDesc = XskRingGetElement(&Queue->fillRing, producerIndex++);
 
             printf_verbose(
-                "Consuming RX entry   {address:%llu, offset:%u, length:%d}\n",
-                XskDescriptorGetAddress(rxDesc->address), XskDescriptorGetOffset(rxDesc->address),
-                rxDesc->length);
+                "Consuming RX entry   {address:%llu, offset:%llu, length:%d}\n",
+                rxDesc->Address.BaseAddress, rxDesc->Address.Offset,
+                rxDesc->Length);
 
             INT64 UNALIGNED *Timestamp = (INT64 UNALIGNED *)
-                ((CHAR*)Queue->umemReg.address + XskDescriptorGetAddress(rxDesc->address) +
-                    XskDescriptorGetOffset(rxDesc->address) + Queue->txPatternLength);
+                ((CHAR*)Queue->umemReg.Address + rxDesc->Address.BaseAddress +
+                    rxDesc->Address.Offset + Queue->txPatternLength);
 
             printf_verbose("latency: %lld\n", NowQpc.QuadPart - *Timestamp);
 
@@ -1267,7 +1264,7 @@ ProcessLat(
                 Queue->latSamples[Queue->latIndex++] = NowQpc.QuadPart - *Timestamp;
             }
 
-            *fillDesc = XskDescriptorGetAddress(rxDesc->address);
+            *fillDesc = rxDesc->Address.BaseAddress;
 
             printf_verbose("Producing FILL entry {address:%llu}\n", *fillDesc);
         }
@@ -1310,19 +1307,18 @@ ProcessLat(
             XSK_BUFFER_DESCRIPTOR *txDesc = XskRingGetElement(&Queue->txRing, producerIndex++);
 
             INT64 UNALIGNED *Timestamp = (INT64 UNALIGNED *)
-                ((CHAR*)Queue->umemReg.address + *freeDesc +
-                    Queue->umemReg.headroom + Queue->txPatternLength);
+                ((CHAR*)Queue->umemReg.Address + *freeDesc +
+                    Queue->umemReg.Headroom + Queue->txPatternLength);
             *Timestamp = NowQpc.QuadPart;
 
-            txDesc->address = *freeDesc;
-            assert(Queue->umemReg.headroom <= MAXUINT16);
-            XskDescriptorSetOffset(&txDesc->address, (UINT16)Queue->umemReg.headroom);
-            txDesc->length = Queue->txiosize;
+            txDesc->Address.BaseAddress = *freeDesc;
+            assert(Queue->umemReg.Headroom <= MAXUINT16);
+            txDesc->Address.Offset = Queue->umemReg.Headroom;
+            txDesc->Length = Queue->txiosize;
 
             printf_verbose(
-                "Producing TX entry {address:%llu, offset:%u, length:%d}\n",
-                XskDescriptorGetAddress(txDesc->address), XskDescriptorGetOffset(txDesc->address),
-                txDesc->length);
+                "Producing TX entry {address:%llu, offset:%llu, length:%d}\n",
+                txDesc->Address.BaseAddress, txDesc->Address.Offset, txDesc->Length);
         }
 
         XskRingConsumerRelease(&Queue->freeRing, available);
@@ -1429,37 +1425,37 @@ ParseQueueArgs(
 
     for (INT i = 0; i < argc; i++) {
         if (!_stricmp(argv[i], "-id")) {
-            if (++i > argc) {
+            if (++i >= argc) {
                 Usage();
             }
             Queue->queueId = atoi(argv[i]);
         } else if (!strcmp(argv[i], "-ring_size")) {
-            if (++i > argc) {
+            if (++i >= argc) {
                 Usage();
             }
             Queue->ringsize = atoi(argv[i]);
         } else if (!strcmp(argv[i], "-c")) {
-            if (++i > argc) {
+            if (++i >= argc) {
                 Usage();
             }
             Queue->umemchunksize = atoi(argv[i]);
         } else if (!_stricmp(argv[i], "-txio")) {
-            if (++i > argc) {
+            if (++i >= argc) {
                 Usage();
             }
             Queue->txiosize = atoi(argv[i]);
         } else if (!strcmp(argv[i], "-u")) {
-            if (++i > argc) {
+            if (++i >= argc) {
                 Usage();
             }
             Queue->umemsize = atoi(argv[i]);
         } else if (!strcmp(argv[i], "-b")) {
-            if (++i > argc) {
+            if (++i >= argc) {
                 Usage();
             }
             Queue->iobatchsize = atoi(argv[i]);
         } else if (!strcmp(argv[i], "-h")) {
-            if (++i > argc) {
+            if (++i >= argc) {
                 Usage();
             }
             Queue->umemheadroom = atoi(argv[i]);
@@ -1468,7 +1464,7 @@ ParseQueueArgs(
         } else if (!_stricmp(argv[i], "-ignore_needpoke")) {
             Queue->flags.optimizePoking = FALSE;
         } else if (!_stricmp(argv[i], "-poll")) {
-            if (++i > argc) {
+            if (++i >= argc) {
                 Usage();
             }
             if (!_stricmp(argv[i], "system")) {
@@ -1481,7 +1477,7 @@ ParseQueueArgs(
                 Usage();
             }
         } else if (!_stricmp(argv[i], "-xdp_mode")) {
-            if (++i > argc) {
+            if (++i >= argc) {
                 Usage();
             }
             if (!_stricmp(argv[i], "system")) {
@@ -1498,7 +1494,7 @@ ParseQueueArgs(
         } else if (!strcmp(argv[i], "-tx_inspect")) {
             Queue->flags.txInspect = TRUE;
         } else if (!strcmp(argv[i], "-tx_pattern")) {
-            if (++i > argc) {
+            if (++i >= argc) {
                 Usage();
             }
             Queue->txPatternLength = (UINT32)strlen(argv[i]);
@@ -1508,7 +1504,7 @@ ParseQueueArgs(
             ASSERT_FRE(Queue->txPattern != NULL);
             GetDescriptorPattern(Queue->txPattern, Queue->txPatternLength, argv[i]);
         } else if (!strcmp(argv[i], "-lat_count")) {
-            if (++i > argc) {
+            if (++i >= argc) {
                 Usage();
             }
             Queue->latSamplesCount = atoi(argv[i]);
@@ -1560,23 +1556,23 @@ ParseThreadArgs(
         if (!strcmp(argv[i], "-q")) {
             Thread->queueCount++;
         } else if (!_stricmp(argv[i], "-na")) {
-            if (++i > argc) {
+            if (++i >= argc) {
                 Usage();
             }
             Thread->nodeAffinity = atoi(argv[i]);
         } else if (!_stricmp(argv[i], "-group")) {
-            if (++i > argc) {
+            if (++i >= argc) {
                 Usage();
             }
             Thread->group = atoi(argv[i]);
             groupSet = TRUE;
         } else if (!_stricmp(argv[i], "-ci")) {
-            if (++i > argc) {
+            if (++i >= argc) {
                 Usage();
             }
             Thread->idealCpu = atoi(argv[i]);
         } else if (!_stricmp(argv[i], "-ca")) {
-            if (++i > argc) {
+            if (++i >= argc) {
                 Usage();
             }
             Thread->cpuAffinity = (DWORD_PTR)_strtoui64(argv[i], NULL, 0);
@@ -1584,7 +1580,7 @@ ParseThreadArgs(
         } else if (!strcmp(argv[i], "-w")) {
             Thread->wait = TRUE;
         } else if (!_stricmp(argv[i], "-yield")) {
-            if (++i > argc) {
+            if (++i >= argc) {
                 Usage();
             }
             Thread->yieldCount = atoi(argv[i]);
@@ -1661,12 +1657,12 @@ ParseArgs(
         if (!strcmp(argv[i], "-t")) {
             threadCount++;
         } else if (!strcmp(argv[i], "-p")) {
-            if (++i > argc) {
+            if (++i >= argc) {
                 Usage();
             }
             udpDestPort = (UINT16)atoi(argv[i]);
         } else if (!strcmp(argv[i], "-d")) {
-            if (++i > argc) {
+            if (++i >= argc) {
                 Usage();
             }
             duration = atoi(argv[i]);
@@ -1808,7 +1804,7 @@ main(
 
     ParseArgs(&threads, &threadCount, argc, argv);
 
-    ASSERT_FRE(SUCCEEDED(XdpOpenApi(XDP_VERSION_PRERELEASE, &XdpApi)));
+    ASSERT_FRE(SUCCEEDED(XdpOpenApi(XDP_API_VERSION_1, &XdpApi)));
 
     periodicStatsEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
     ASSERT_FRE(periodicStatsEvent != NULL);

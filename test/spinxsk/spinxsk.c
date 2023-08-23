@@ -16,6 +16,7 @@
 #include <afxdp_helper.h>
 #include <afxdp_experimental.h>
 #include <xdpapi.h>
+#include <xdpapi_experimental.h>
 #include <xdpapi_internal.h>
 #include <xdprtl.h>
 #include <bpf/bpf.h>
@@ -27,11 +28,6 @@
 
 #define SHALLOW_STR_OF(x) #x
 #define STR_OF(x) SHALLOW_STR_OF(x)
-
-#define ALIGN_DOWN_BY(length, alignment) \
-    ((ULONG_PTR)(length)& ~(alignment - 1))
-#define ALIGN_UP_BY(length, alignment) \
-    (ALIGN_DOWN_BY(((ULONG_PTR)(length)+alignment - 1), alignment))
 
 #define STRUCT_FIELD_OFFSET(structPtr, field) \
     ((UCHAR *)&(structPtr)->field - (UCHAR *)(structPtr))
@@ -208,6 +204,10 @@ struct QUEUE_CONTEXT {
     UINT32 queueId;
 
     CONST XDP_API_TABLE *xdpApi;
+    XDP_RSS_GET_CAPABILITIES_FN *XdpRssGetCapabilities;
+    XDP_RSS_SET_FN *XdpRssSet;
+    XDP_RSS_GET_FN *XdpRssGet;
+    XDP_QEO_SET_FN *XdpQeoSet;
     HANDLE sock;
     HANDLE sharedUmemSock;
     HANDLE rss;
@@ -715,13 +715,13 @@ FreeRingInitialize(
     }
     *FreeRingBase = (BYTE *)FreeRingLayout;
 
-    freeRingInfo.ring = (BYTE *)FreeRingLayout;
-    freeRingInfo.producerIndexOffset = (UINT32)STRUCT_FIELD_OFFSET(FreeRingLayout, Producer);
-    freeRingInfo.consumerIndexOffset = (UINT32)STRUCT_FIELD_OFFSET(FreeRingLayout, Consumer);
-    freeRingInfo.flagsOffset = (UINT32)STRUCT_FIELD_OFFSET(FreeRingLayout, Flags);
-    freeRingInfo.descriptorsOffset = (UINT32)STRUCT_FIELD_OFFSET(FreeRingLayout, Descriptors[0]);
-    freeRingInfo.size = DescriptorCount;
-    freeRingInfo.elementStride = sizeof(*FreeRingLayout->Descriptors);
+    freeRingInfo.Ring = (BYTE *)FreeRingLayout;
+    freeRingInfo.ProducerIndexOffset = (UINT32)STRUCT_FIELD_OFFSET(FreeRingLayout, Producer);
+    freeRingInfo.ConsumerIndexOffset = (UINT32)STRUCT_FIELD_OFFSET(FreeRingLayout, Consumer);
+    freeRingInfo.FlagsOffset = (UINT32)STRUCT_FIELD_OFFSET(FreeRingLayout, Flags);
+    freeRingInfo.DescriptorsOffset = (UINT32)STRUCT_FIELD_OFFSET(FreeRingLayout, Descriptors[0]);
+    freeRingInfo.Size = DescriptorCount;
+    freeRingInfo.ElementStride = sizeof(*FreeRingLayout->Descriptors);
     XskRingInitialize(FreeRing, &freeRingInfo);
 
     for (UINT32 i = 0; i < DescriptorCount; i++) {
@@ -770,8 +770,8 @@ CleanupQueue(
         free(Queue->fuzzers);
     }
 
-    if (Queue->umemReg.address != NULL) {
-        res = VirtualFree(Queue->umemReg.address, 0, MEM_RELEASE);
+    if (Queue->umemReg.Address != NULL) {
+        res = VirtualFree(Queue->umemReg.Address, 0, MEM_RELEASE);
         ASSERT_FRE(res);
     }
 
@@ -793,6 +793,10 @@ FuzzRssSet(
 {
     XDP_RSS_CONFIGURATION* RssConfiguration = NULL;
     UINT8 *ProcessorGroups = NULL;
+
+    if (queue->XdpRssSet == NULL) {
+        goto Exit;
+    }
 
     WORD ActiveProcGroups = GetActiveProcessorGroupCount();
     if (ActiveProcGroups == 0) {
@@ -855,11 +859,11 @@ FuzzRssSet(
     //
 
     if (fuzzer->fuzzerInterface != NULL) {
-        (void)queue->xdpApi->XdpRssSet(fuzzer->fuzzerInterface, RssConfiguration, RssConfigSize);
+        (void)queue->XdpRssSet(fuzzer->fuzzerInterface, RssConfiguration, RssConfigSize);
     } else {
         AcquireSRWLockShared(&queue->rssLock);
         if (queue->rss != NULL) {
-            (void)queue->xdpApi->XdpRssSet(queue->rss, RssConfiguration, RssConfigSize);
+            (void)queue->XdpRssSet(queue->rss, RssConfiguration, RssConfigSize);
         }
         ReleaseSRWLockShared(&queue->rssLock);
     }
@@ -884,12 +888,16 @@ FuzzRssGet(
     HRESULT res;
     UINT32 size = 0;
 
+    if (Queue->XdpRssGet == NULL) {
+        goto Exit;
+    }
+
     if (Fuzzer->fuzzerInterface != NULL) {
-        res = Queue->xdpApi->XdpRssGet(Fuzzer->fuzzerInterface, NULL, &size);
+        res = Queue->XdpRssGet(Fuzzer->fuzzerInterface, NULL, &size);
     } else {
         AcquireSRWLockShared(&Queue->rssLock);
         if (Queue->rss != NULL) {
-            res = Queue->xdpApi->XdpRssGet(Queue->rss, NULL, &size);
+            res = Queue->XdpRssGet(Queue->rss, NULL, &size);
         } else {
             res = E_INVALIDARG;
         }
@@ -909,12 +917,12 @@ FuzzRssGet(
 
     if (Fuzzer->fuzzerInterface != NULL) {
 #pragma prefast(suppress : 6386, "SAL does not understand the mod operator")
-        Queue->xdpApi->XdpRssGet(Fuzzer->fuzzerInterface, rssConfiguration, &size);
+        Queue->XdpRssGet(Fuzzer->fuzzerInterface, rssConfiguration, &size);
     } else {
         AcquireSRWLockShared(&Queue->rssLock);
         if (Queue->rss != NULL) {
 #pragma prefast(suppress : 6386, "SAL does not understand the mod operator")
-            Queue->xdpApi->XdpRssGet(Queue->rss, rssConfiguration, &size);
+            Queue->XdpRssGet(Queue->rss, rssConfiguration, &size);
         }
         ReleaseSRWLockShared(&Queue->rssLock);
     }
@@ -932,16 +940,20 @@ FuzzRssGetCapabilities(
     _In_ QUEUE_CONTEXT *Queue
     )
 {
-    XDP_RSS_CAPABILITIES* rssCapabilities = NULL;
+    XDP_RSS_CAPABILITIES *rssCapabilities = NULL;
     HRESULT res;
     UINT32 size = 0;
 
+    if (Queue->XdpRssGetCapabilities == NULL) {
+        goto Exit;
+    }
+
     if (Fuzzer->fuzzerInterface != NULL) {
-        res = Queue->xdpApi->XdpRssGetCapabilities(Fuzzer->fuzzerInterface, NULL, &size);
+        res = Queue->XdpRssGetCapabilities(Fuzzer->fuzzerInterface, NULL, &size);
     } else {
         AcquireSRWLockShared(&Queue->rssLock);
         if (Queue->rss != NULL) {
-            res = Queue->xdpApi->XdpRssGetCapabilities(Queue->rss, NULL, &size);
+            res = Queue->XdpRssGetCapabilities(Queue->rss, NULL, &size);
         } else {
             res = E_INVALIDARG;
         }
@@ -961,12 +973,12 @@ FuzzRssGetCapabilities(
 
     if (Fuzzer->fuzzerInterface != NULL) {
 #pragma prefast(suppress : 6386, "SAL does not understand the mod operator")
-        Queue->xdpApi->XdpRssGetCapabilities(Fuzzer->fuzzerInterface, rssCapabilities, &size);
+        Queue->XdpRssGetCapabilities(Fuzzer->fuzzerInterface, rssCapabilities, &size);
     } else {
         AcquireSRWLockShared(&Queue->rssLock);
         if (Queue->rss != NULL) {
 #pragma prefast(suppress : 6386, "SAL does not understand the mod operator")
-            Queue->xdpApi->XdpRssGetCapabilities(Queue->rss, rssCapabilities, &size);
+            Queue->XdpRssGetCapabilities(Queue->rss, rssCapabilities, &size);
         }
         ReleaseSRWLockShared(&Queue->rssLock);
     }
@@ -979,7 +991,52 @@ Exit:
 }
 
 VOID
-FuzzRss(
+FuzzQeoSet(
+    _In_ XSK_FUZZER_WORKER *fuzzer,
+    _In_ QUEUE_CONTEXT *queue
+    )
+{
+    XDP_QUIC_CONNECTION *Connections = NULL;
+    UINT32 ConnectionCount = RandUlong() % 16;
+    UINT32 ConnectionsSize = ConnectionCount * sizeof(*Connections);
+
+    if (queue->XdpQeoSet == NULL) {
+        goto Exit;
+    }
+
+    Connections = calloc(1, ConnectionsSize);
+    if (Connections == NULL) {
+        goto Exit;
+    }
+
+    for (UINT32 i = 0; i < ConnectionCount; i++) {
+        XDP_QUIC_CONNECTION *Connection = &Connections[i];
+
+        XdpInitializeQuicConnection(Connection, sizeof(*Connection));
+        Connection->Operation = RandUlong() % 4;
+        Connection->Direction = RandUlong() % 4;
+        Connection->DecryptFailureAction = RandUlong() % 4;
+        Connection->KeyPhase = RandUlong() % 4;
+        Connection->CipherType = RandUlong() % 8;
+        Connection->AddressFamily = RandUlong() % 4;
+        Connection->UdpPort = (UINT16)RandUlong();
+        Connection->NextPacketNumber = RandUlong();
+        Connection->ConnectionIdLength = RandUlong() % (sizeof(Connection->ConnectionId) + 4);
+    }
+
+    if (fuzzer->fuzzerInterface != NULL) {
+        (void)queue->XdpQeoSet(fuzzer->fuzzerInterface, Connections, ConnectionsSize);
+    }
+
+Exit:
+
+    if (Connections != NULL) {
+        free(Connections);
+    }
+}
+
+VOID
+FuzzInterface(
     _In_ XSK_FUZZER_WORKER *fuzzer,
     _In_ QUEUE_CONTEXT *queue
     )
@@ -1036,6 +1093,10 @@ FuzzRss(
     if (RandUlong() % 10 == 0) {
         FuzzRssGetCapabilities(fuzzer, queue);
     }
+
+    if (RandUlong() % 10 == 0) {
+        FuzzQeoSet(fuzzer, queue);
+    }
 }
 
 HRESULT
@@ -1060,10 +1121,17 @@ InitializeQueue(
     InitializeCriticalSection(&queue->sharedUmemRxProgramSet.Lock);
     InitializeSRWLock(&queue->rssLock);
 
-    res = XdpOpenApi(XDP_VERSION_PRERELEASE, &queue->xdpApi);
+    res = XdpOpenApi(XDP_API_VERSION_1, &queue->xdpApi);
     if (FAILED(res)) {
         goto Exit;
     }
+
+    queue->XdpRssGetCapabilities =
+        (XDP_RSS_GET_CAPABILITIES_FN *)queue->xdpApi->XdpGetRoutine(
+            XDP_RSS_GET_CAPABILITIES_FN_NAME);
+    queue->XdpRssSet = (XDP_RSS_SET_FN *)queue->xdpApi->XdpGetRoutine(XDP_RSS_SET_FN_NAME);
+    queue->XdpRssGet = (XDP_RSS_GET_FN *)queue->xdpApi->XdpGetRoutine(XDP_RSS_GET_FN_NAME);
+    queue->XdpQeoSet = (XDP_QEO_SET_FN *)queue->xdpApi->XdpGetRoutine(XDP_QEO_SET_FN_NAME);
 
     queue->fuzzers = calloc(queue->fuzzerCount, sizeof(*queue->fuzzers));
     if (queue->fuzzers == NULL) {
@@ -1198,24 +1266,24 @@ FuzzSocketUmemSetup(
         // driver verifier's fault injection provides coverage of mapping
         // failure paths.
         //
-        umemReg.totalSize = RandUlong() % 0x100000;
+        umemReg.TotalSize = RandUlong() % 0x100000;
 
         if (RandUlong() % 6) {
-            umemReg.chunkSize = RandUlong() % 4096;
+            umemReg.ChunkSize = RandUlong() % 4096;
         } else {
-            umemReg.chunkSize = RandUlong();
+            umemReg.ChunkSize = RandUlong();
         }
 
         if (RandUlong() % 6) {
-            umemReg.headroom = RandUlong() % ((umemReg.chunkSize / 4) + 1);
+            umemReg.Headroom = RandUlong() % ((umemReg.ChunkSize / 4) + 1);
         } else {
-            umemReg.headroom = RandUlong();
+            umemReg.Headroom = RandUlong();
         }
 
-        umemReg.address =
+        umemReg.Address =
             VirtualAlloc(
-                NULL, umemReg.totalSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-        if (umemReg.address == NULL) {
+                NULL, umemReg.TotalSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (umemReg.Address == NULL) {
             return;
         }
 
@@ -1226,9 +1294,9 @@ FuzzSocketUmemSetup(
             Queue->umemReg = umemReg;
             WriteBooleanRelease(WasUmemRegistered, TRUE);
             TraceVerbose("q[%u]: umem totalSize:%llu chunkSize:%u headroom:%u",
-                Queue->queueId, umemReg.totalSize, umemReg.chunkSize, umemReg.headroom);
+                Queue->queueId, umemReg.TotalSize, umemReg.ChunkSize, umemReg.Headroom);
         } else {
-            BOOL success = VirtualFree(umemReg.address, 0, MEM_RELEASE);
+            BOOL success = VirtualFree(umemReg.Address, 0, MEM_RELEASE);
             ASSERT_FRE(success);
         }
     }
@@ -1241,24 +1309,16 @@ FuzzSocketSharedUmemSetup(
     _In_ HANDLE SharedUmemSock
     )
 {
+    HRESULT res;
+
     if (RandUlong() % 2) {
-        HRESULT res;
-
-        switch (RandUlong() % 4) {
-        case 0:
-            SharedUmemSock = NULL;
-            break;
-        case 1:
-            SharedUmemSock = Sock;
-            break;
-        }
-
         res =
             Queue->xdpApi->XskSetSockopt(
-                Sock, XSK_SOCKOPT_SHARE_UMEM, &SharedUmemSock, sizeof(SharedUmemSock));
+                Sock, XSK_SOCKOPT_UMEM_REG, &Queue->umemReg, sizeof(Queue->umemReg));
         if (SUCCEEDED(res)) {
             TraceVerbose(
-                "q[%u]: umem shared with SharedUmemSock=%p", Queue->queueId, SharedUmemSock);
+                "q[%u]: umem shared with SharedUmemSock=%p Buffer=%p",
+                Queue->queueId, SharedUmemSock, Queue->umemReg.Address);
         }
     }
 }
@@ -1272,7 +1332,7 @@ FuzzRingSize(
     UINT32 numUmemDescriptors;
 
     if (ReadBooleanAcquire(&Queue->scenarioConfig.isUmemRegistered)) {
-        numUmemDescriptors = (UINT32)(Queue->umemReg.totalSize / Queue->umemReg.chunkSize);
+        numUmemDescriptors = (UINT32)(Queue->umemReg.TotalSize / Queue->umemReg.ChunkSize);
     } else {
         numUmemDescriptors = (RandUlong() % 16) + 1;
     }
@@ -1539,14 +1599,14 @@ InitializeDatapath(
     UINT32 ringInfoSize = sizeof(ringInfo);
     QUEUE_CONTEXT *queue = Datapath->shared->queue;
     UINT32 umemDescriptorCount =
-        (UINT32)(queue->umemReg.totalSize / queue->umemReg.chunkSize);
+        (UINT32)(queue->umemReg.TotalSize / queue->umemReg.ChunkSize);
     UINT32 descriptorCount = umemDescriptorCount / 2;
     UINT32 descriptorStart;
 
     Datapath->iobatchsize = DEFAULT_IO_BATCH;
     Datapath->pollMode = XSK_POLL_MODE_DEFAULT;
     Datapath->flags.wait = FALSE;
-    Datapath->txiosize = queue->umemReg.chunkSize - queue->umemReg.headroom;
+    Datapath->txiosize = queue->umemReg.ChunkSize - queue->umemReg.Headroom;
 
     res =
         queue->xdpApi->XskGetSockopt(
@@ -1563,17 +1623,17 @@ InitializeDatapath(
 
     if (Datapath->flags.rx) {
         TraceVerbose("q[%u]d[0x%p]: rx_size:%u fill_size:%u",
-            queue->queueId, Datapath->threadHandle, ringInfo.rx.size, ringInfo.fill.size);
-        XskRingInitialize(&Datapath->rxRing, &ringInfo.rx);
-        XskRingInitialize(&Datapath->fillRing, &ringInfo.fill);
+            queue->queueId, Datapath->threadHandle, ringInfo.Rx.Size, ringInfo.Fill.Size);
+        XskRingInitialize(&Datapath->rxRing, &ringInfo.Rx);
+        XskRingInitialize(&Datapath->fillRing, &ringInfo.Fill);
 
-        ASSERT_FRE(Datapath->rxRing.size > 0 && Datapath->fillRing.size > 0);
+        ASSERT_FRE(Datapath->rxRing.Size > 0 && Datapath->fillRing.Size > 0);
 
         descriptorStart = 0;
         res =
             FreeRingInitialize(
                 &Datapath->rxFreeRing, &Datapath->rxFreeRingBase, descriptorStart,
-                queue->umemReg.chunkSize, descriptorCount);
+                queue->umemReg.ChunkSize, descriptorCount);
         if (FAILED(res)) {
             goto Exit;
         }
@@ -1581,17 +1641,17 @@ InitializeDatapath(
     }
     if (Datapath->flags.tx) {
         TraceVerbose("q[%u]d[0x%p]: tx_size:%u comp_size:%u",
-            queue->queueId, Datapath->threadHandle, ringInfo.tx.size, ringInfo.completion.size);
-        XskRingInitialize(&Datapath->txRing, &ringInfo.tx);
-        XskRingInitialize(&Datapath->compRing, &ringInfo.completion);
+            queue->queueId, Datapath->threadHandle, ringInfo.Tx.Size, ringInfo.Completion.Size);
+        XskRingInitialize(&Datapath->txRing, &ringInfo.Tx);
+        XskRingInitialize(&Datapath->compRing, &ringInfo.Completion);
 
-        ASSERT_FRE(Datapath->txRing.size > 0 && Datapath->compRing.size > 0);
+        ASSERT_FRE(Datapath->txRing.Size > 0 && Datapath->compRing.Size > 0);
 
-        descriptorStart = (umemDescriptorCount / 2) * queue->umemReg.chunkSize;
+        descriptorStart = (umemDescriptorCount / 2) * queue->umemReg.ChunkSize;
         res =
             FreeRingInitialize(
                 &Datapath->txFreeRing, &Datapath->txFreeRingBase, descriptorStart,
-                queue->umemReg.chunkSize, descriptorCount);
+                queue->umemReg.ChunkSize, descriptorCount);
         if (FAILED(res)) {
             goto Exit;
         }
@@ -1663,7 +1723,7 @@ ProcessPkts(
                 XSK_BUFFER_DESCRIPTOR *rxDesc = XskRingGetElement(&Datapath->rxRing, consumerIndex++);
                 UINT64 *freeDesc = XskRingGetElement(&Datapath->rxFreeRing, producerIndex++);
 
-                *freeDesc = XskDescriptorGetAddress(rxDesc->address);
+                *freeDesc = rxDesc->Address.BaseAddress;
             }
 
             XskRingConsumerRelease(&Datapath->rxRing, available);
@@ -1728,7 +1788,7 @@ ProcessPkts(
             Datapath->txPacketCount += available;
 
             if (XskRingProducerReserve(&Datapath->txRing, MAXUINT32, &producerIndex) !=
-                    Datapath->txRing.size) {
+                    Datapath->txRing.Size) {
                 notifyFlags |= XSK_NOTIFY_FLAG_POKE_TX;
             }
 
@@ -1746,8 +1806,8 @@ ProcessPkts(
                 UINT64 *freeDesc = XskRingGetElement(&Datapath->txFreeRing, consumerIndex++);
                 XSK_BUFFER_DESCRIPTOR *txDesc = XskRingGetElement(&Datapath->txRing, producerIndex++);
 
-                txDesc->address = *freeDesc;
-                txDesc->length = Datapath->txiosize;
+                txDesc->Address.AddressAndOffset = *freeDesc;
+                txDesc->Length = Datapath->txiosize;
             }
 
             XskRingConsumerRelease(&Datapath->txFreeRing, available);
@@ -1815,8 +1875,8 @@ PrintDatapathStats(
         "q[%u]d[0x%p]: rx:%s tx:%s rxDrop:%llu rxTrunc:%llu "
         "rxInvalidDesc:%llu txInvalidDesc:%llu xdpMode:%s\n",
         Datapath->shared->queue->queueId, Datapath->threadHandle,
-        rxPacketCount, txPacketCount, stats.rxDropped, stats.rxTruncated,
-        stats.rxInvalidDescriptors, stats.txInvalidDescriptors,
+        rxPacketCount, txPacketCount, stats.RxDropped, stats.RxTruncated,
+        stats.RxInvalidDescriptors, stats.TxInvalidDescriptors,
         XdpModeToString[Datapath->shared->queue->xdpMode]);
 }
 
@@ -1880,7 +1940,7 @@ XskFuzzerWorkerFn(
                 queue, queue->sharedUmemSock, queue->sock);
         }
 
-        FuzzRss(fuzzer, queue);
+        FuzzInterface(fuzzer, queue);
 
         FuzzSocketRxTxSetup(
             queue, queue->sock,
@@ -2199,6 +2259,18 @@ AdminFn(
                 (BYTE *)&delayDetachTimeout, sizeof(delayDetachTimeout));
             TraceVerbose("admin: set delayDetachTimeout regStatus=%d", regStatus);
         }
+
+        if (!(RandUlong() % 10)) {
+            INT exitCode;
+            TraceVerbose("admin: query counters");
+            RtlZeroMemory(cmdBuff, sizeof(cmdBuff));
+            sprintf_s(
+                cmdBuff, sizeof(cmdBuff),
+                "%s -Command \"Get-Counter -Counter (Get-Counter -ListSet XDP*).Paths -ErrorAction Ignore | Out-Null\"",
+                powershellPrefix);
+            exitCode = system(cmdBuff);
+            TraceVerbose("admin: query counters exitCode=%d", exitCode);
+        }
     }
 
     //
@@ -2285,7 +2357,7 @@ ParseArgs(
 
     while (i < argc) {
         if (!strcmp(argv[i], "-Minutes")) {
-            if (++i > argc) {
+            if (++i >= argc) {
                 Usage();
             }
             duration = atoi(argv[i]) * 60;
@@ -2295,13 +2367,13 @@ ParseArgs(
         } else if (!strcmp(argv[i], "-Verbose")) {
             verbose = TRUE;
         } else if (!strcmp(argv[i], "-QueueCount")) {
-            if (++i > argc) {
+            if (++i >= argc) {
                 Usage();
             }
             queueCount = atoi(argv[i]);
             TraceVerbose("queueCount=%u", queueCount);
         } else if (!strcmp(argv[i], "-FuzzerCount")) {
-            if (++i > argc) {
+            if (++i >= argc) {
                 Usage();
             }
             fuzzerCount = atoi(argv[i]);
@@ -2310,13 +2382,13 @@ ParseArgs(
             cleanDatapath = TRUE;
             TraceVerbose("cleanDatapath=%!BOOLEAN!", cleanDatapath);
         } else if (!strcmp(argv[i], "-WatchdogCmd")) {
-            if (++i > argc) {
+            if (++i >= argc) {
                 Usage();
             }
             watchdogCmd = argv[i];
             TraceVerbose("watchdogCmd=%s", watchdogCmd);
         } else if (!strcmp(argv[i], "-SuccessThresholdPercent")) {
-            if (++i > argc) {
+            if (++i >= argc) {
                 Usage();
             }
             successThresholdPercent = (UINT8)atoi(argv[i]);

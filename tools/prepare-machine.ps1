@@ -48,6 +48,9 @@ param (
     [switch]$ForSpinxskTest = $false,
 
     [Parameter(Mandatory = $false)]
+    [switch]$ForPerfTest = $false,
+
+    [Parameter(Mandatory = $false)]
     [switch]$ForLogging = $false,
 
     [Parameter(Mandatory = $false)]
@@ -61,40 +64,45 @@ param (
 )
 
 Set-StrictMode -Version 'Latest'
-$PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
+$ErrorActionPreference = 'Stop'
 
 $RootDir = Split-Path $PSScriptRoot -Parent
 . $RootDir\tools\common.ps1
 
-if (!$ForBuild -and !$ForEbpfBuild -and !$ForTest -and !$ForFunctionalTest -and !$ForSpinxskTest -and !$ForLogging) {
-    Write-Error 'Must one of -ForBuild, -ForTest, -ForFunctionalTest, -ForSpinxskTest, or -ForLogging'
+$ArtifactsDir = "$RootDir\artifacts"
+
+if (!$ForBuild -and !$ForEbpfBuild -and !$ForTest -and !$ForFunctionalTest -and !$ForSpinxskTest -and !$ForPerfTest -and !$ForLogging) {
+    Write-Error 'Must one of -ForBuild, -ForTest, -ForFunctionalTest, -ForSpinxskTest, -ForPerfTest, or -ForLogging'
 }
 
-$EbpfNugetVersion = "eBPF-for-Windows.0.6.0"
-$EbpfNugetBuild = "4245975873"
-$EbpfNuget = "$EbpfNugetVersion+$EbpfNugetBuild.nupkg"
-$EbpfNugetUrl = "https://github.com/microsoft/xdp-for-windows/releases/download/main-prerelease/$EbpfNugetVersion+$EbpfNugetBuild.nupkg"
+$EbpfNugetVersion = "eBPF-for-Windows.0.9.0"
+$EbpfNugetBuild = "+5122375852"
+$EbpfNuget = "$EbpfNugetVersion$EbpfNugetBuild.nupkg"
+$EbpfNugetUrl = "https://github.com/microsoft/xdp-for-windows/releases/download/main-prerelease/$EbpfNugetVersion$EbpfNugetBuild.nupkg"
 $EbpfNugetRestoreDir = "$RootDir/packages/$EbpfNugetVersion"
 
 # Flag that indicates something required a reboot.
 $Reboot = $false
 
 function Download-CoreNet-Deps {
+    $CoreNetCiCommit = Get-CoreNetCiCommit
+
     # Download and extract https://github.com/microsoft/corenet-ci.
-    if (!(Test-Path "artifacts")) { mkdir artifacts }
-    if ($Force -and (Test-Path "artifacts/corenet-ci-main")) {
-        Remove-Item -Recurse -Force "artifacts/corenet-ci-main"
+    if (!(Test-Path $ArtifactsDir)) { mkdir $ArtifactsDir }
+    if ($Force -and (Test-Path "$ArtifactsDir/corenet-ci-$CoreNetCiCommit")) {
+        Remove-Item -Recurse -Force "$ArtifactsDir/corenet-ci-$CoreNetCiCommit"
     }
-    if (!(Test-Path "artifacts/corenet-ci-main")) {
-        Invoke-WebRequest-WithRetry -Uri "https://github.com/microsoft/corenet-ci/archive/refs/heads/main.zip" -OutFile "artifacts\corenet-ci.zip"
-        Expand-Archive -Path "artifacts\corenet-ci.zip" -DestinationPath "artifacts" -Force
-        Remove-Item -Path "artifacts\corenet-ci.zip"
+    if (!(Test-Path "$ArtifactsDir/corenet-ci-$CoreNetCiCommit")) {
+        Remove-Item -Recurse -Force "$ArtifactsDir/corenet-ci-*"
+        Invoke-WebRequest-WithRetry -Uri "https://github.com/microsoft/corenet-ci/archive/$CoreNetCiCommit.zip" -OutFile "$ArtifactsDir\corenet-ci.zip"
+        Expand-Archive -Path "$ArtifactsDir\corenet-ci.zip" -DestinationPath $ArtifactsDir -Force
+        Remove-Item -Path "$ArtifactsDir\corenet-ci.zip"
     }
 }
 
 function Download-eBpf-Nuget {
     # Download and extract private eBPF Nuget package.
-    $NugetDir = "$RootDir/artifacts/nuget"
+    $NugetDir = "$ArtifactsDir/nuget"
     if ($Force -and (Test-Path $NugetDir)) {
         Remove-Item -Recurse -Force $NugetDir
     }
@@ -148,7 +156,7 @@ function Setup-TestSigning {
 
 # Installs the XDP certificates.
 function Install-Certs {
-    $CodeSignCertPath = "artifacts\CoreNetSignRoot.cer"
+    $CodeSignCertPath = Get-CoreNetCiArtifactPath -Name "CoreNetSignRoot.cer"
     if (!(Test-Path $CodeSignCertPath)) {
         Write-Error "$CodeSignCertPath does not exist!"
     }
@@ -169,12 +177,12 @@ function Setup-VcRuntime {
     if (!$Installed -or $Force) {
         Write-Host "Installing VC++ runtime"
 
-        if (!(Test-Path "artifacts")) { mkdir artifacts }
-        Remove-Item -Force "artifacts\vc_redist.x64.exe" -ErrorAction Ignore
+        if (!(Test-Path $ArtifactsDir)) { mkdir artifacts }
+        Remove-Item -Force "$ArtifactsDir\vc_redist.x64.exe" -ErrorAction Ignore
 
         # Download and install.
-        Invoke-WebRequest-WithRetry -Uri "https://aka.ms/vs/16/release/vc_redist.x64.exe" -OutFile "artifacts\vc_redist.x64.exe"
-        Invoke-Expression -Command "artifacts\vc_redist.x64.exe /install /passive"
+        Invoke-WebRequest-WithRetry -Uri "https://aka.ms/vs/16/release/vc_redist.x64.exe" -OutFile "$ArtifactsDir\vc_redist.x64.exe"
+        & $ArtifactsDir\vc_redist.x64.exe /install /passive | Write-Verbose
     }
 }
 
@@ -182,13 +190,13 @@ function Setup-VsTest {
     if (!(Get-VsTestPath) -or $Force) {
         Write-Host "Installing VsTest"
 
-        if (!(Test-Path "artifacts")) { mkdir artifacts }
-        Remove-Item -Recurse -Force "artifacts\Microsoft.TestPlatform" -ErrorAction Ignore
+        if (!(Test-Path $ArtifactsDir)) { mkdir $ArtifactsDir }
+        Remove-Item -Recurse -Force "$ArtifactsDir\Microsoft.TestPlatform" -ErrorAction Ignore
 
         # Download and extract.
-        Invoke-WebRequest-WithRetry -Uri "https://www.nuget.org/api/v2/package/Microsoft.TestPlatform/16.11.0" -OutFile "artifacts\Microsoft.TestPlatform.zip"
-        Expand-Archive -Path "artifacts\Microsoft.TestPlatform.zip" -DestinationPath "artifacts\Microsoft.TestPlatform" -Force
-        Remove-Item -Path "artifacts\Microsoft.TestPlatform.zip"
+        Invoke-WebRequest-WithRetry -Uri "https://www.nuget.org/api/v2/package/Microsoft.TestPlatform/16.11.0" -OutFile "$ArtifactsDir\Microsoft.TestPlatform.zip"
+        Expand-Archive -Path "$ArtifactsDir\Microsoft.TestPlatform.zip" -DestinationPath "$ArtifactsDir\Microsoft.TestPlatform" -Force
+        Remove-Item -Path "$ArtifactsDir\Microsoft.TestPlatform.zip"
 
         # Add to PATH.
         $RootDir = Split-Path $PSScriptRoot -Parent
@@ -199,6 +207,20 @@ function Setup-VsTest {
     }
 }
 
+function Install-AzStorageModule {
+    if (!(Get-PackageProvider -ListAvailable -Name NuGet -ErrorAction Ignore)) {
+        Write-Host "Installing NuGet package provider"
+        Install-PackageProvider -Name NuGet -Force | Write-Verbose
+    }
+    if (!(Get-Module -ListAvailable -Name Az.Storage)) {
+        Write-Host "Installing Az.Storage module"
+        Install-Module Az.Storage -Repository PSGallery -Scope CurrentUser -AllowClobber -Force | Write-Verbose
+    }
+    # AzureRM is installed by default on some CI images and is incompatible with
+    # Az. Uninstall.
+    Uninstall-AzureRm
+}
+
 if ($Cleanup) {
     if ($ForTest) {
         Uninstall-Certs
@@ -207,8 +229,6 @@ if ($Cleanup) {
     if ($ForBuild) {
         Download-CoreNet-Deps
         Download-eBpf-Nuget
-        Copy-Item artifacts\corenet-ci-main\vm-setup\CoreNetSignRoot.cer artifacts\CoreNetSignRoot.cer
-        Copy-Item artifacts\corenet-ci-main\vm-setup\CoreNetSign.pfx artifacts\CoreNetSign.pfx
     }
 
     if ($ForEbpfBuild) {
@@ -240,6 +260,13 @@ if ($Cleanup) {
         if (!$?) {
             $Reboot = $true
         }
+
+        if ((Get-ItemProperty -Path HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl).CrashDumpEnabled -ne 1) {
+            # Enable complete (kernel + user) system crash dumps
+            Write-Verbose "reg.exe add HKLM\System\CurrentControlSet\Control\CrashControl /v CrashDumpEnabled /d 1 /t REG_DWORD /f"
+            reg.exe add HKLM\System\CurrentControlSet\Control\CrashControl /v CrashDumpEnabled /d 1 /t REG_DWORD /f
+            $Reboot = $true
+        }
     }
 
     if ($ForSpinxskTest) {
@@ -260,23 +287,34 @@ if ($Cleanup) {
         if (!$?) {
             $Reboot = $true
         }
+
+        if ((Get-ItemProperty -Path HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl).CrashDumpEnabled -ne 1) {
+            # Enable complete (kernel + user) system crash dumps
+            Write-Verbose "reg.exe add HKLM\System\CurrentControlSet\Control\CrashControl /v CrashDumpEnabled /d 1 /t REG_DWORD /f"
+            reg.exe add HKLM\System\CurrentControlSet\Control\CrashControl /v CrashDumpEnabled /d 1 /t REG_DWORD /f
+            $Reboot = $true
+        }
+    }
+
+    if ($ForPerfTest) {
+        $ForTest = $true
+
+        Write-Verbose "verifier.exe /reset"
+        verifier.exe /reset | Write-Verbose
+        if (!$?) {
+            $Reboot = $true
+        }
+
+        Install-AzStorageModule
     }
 
     if ($ForTest) {
-        Setup-TestSigning
-        Download-CoreNet-Deps
-        Download-Ebpf-Msi
-        Copy-Item artifacts\corenet-ci-main\vm-setup\CoreNetSignRoot.cer artifacts\CoreNetSignRoot.cer
-        Copy-Item artifacts\corenet-ci-main\vm-setup\CoreNetSign.pfx artifacts\CoreNetSign.pfx
-        Copy-Item artifacts\corenet-ci-main\vm-setup\devcon.exe C:\devcon.exe
-        Copy-Item artifacts\corenet-ci-main\vm-setup\dswdevice.exe C:\dswdevice.exe
-        Copy-Item artifacts\corenet-ci-main\vm-setup\kd.exe C:\kd.exe
-        Copy-Item artifacts\corenet-ci-main\vm-setup\livekd64.exe C:\livekd64.exe
-        Copy-Item artifacts\corenet-ci-main\vm-setup\notmyfault64.exe C:\notmyfault64.exe
-        Copy-Item artifacts\corenet-ci-main\vm-setup\wsario.exe C:\wsario.exe
-        Install-Certs
         Setup-VcRuntime
         Setup-VsTest
+        Download-CoreNet-Deps
+        Download-Ebpf-Msi
+        Setup-TestSigning
+        Install-Certs
     }
 
     if ($ForLogging) {
