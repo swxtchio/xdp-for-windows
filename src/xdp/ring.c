@@ -69,5 +69,5 @@ XdpRingFreeRing(
     _In_ XDP_RING *Ring
     )
 {
-    ExFreePoolWithTag(Ring, XDP_POOLTAG_RING);
+    ExFreePool(Ring);
 }

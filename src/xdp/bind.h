@@ -12,8 +12,6 @@ typedef struct _XDP_BINDING_HANDLE *XDP_BINDING_HANDLE;
 typedef struct _XDP_BINDING_CLIENT_ENTRY XDP_BINDING_CLIENT_ENTRY;
 typedef struct _XDP_BINDING_WORKITEM XDP_BINDING_WORKITEM;
 typedef struct _XDP_IFSET_HANDLE *XDP_IFSET_HANDLE;
-typedef struct _XDP_IF_OFFLOAD_HANDLE *XDP_IF_OFFLOAD_HANDLE;
-typedef struct _XDP_OFFLOAD_IF_SETTINGS XDP_OFFLOAD_IF_SETTINGS;
 
 //
 // Serialized work queue callback.
@@ -84,39 +82,23 @@ XdpIfSupportsHookId(
     _In_ CONST XDP_HOOK_ID *Target
     );
 
-BOOLEAN
-XdpIfAcquireOffloadRundown(
-    _In_ XDP_IFSET_HANDLE IfSetHandle
-    );
-
-VOID
-XdpIfReleaseOffloadRundown(
-    _In_ XDP_IFSET_HANDLE IfSetHandle
-    );
-
-XDP_OFFLOAD_IF_SETTINGS *
-XdpIfGetOffloadIfSettings(
-    _In_ XDP_IFSET_HANDLE IfSetHandle,
-    _In_ XDP_IF_OFFLOAD_HANDLE InterfaceOffloadHandle
-    );
-
 NTSTATUS
 XdpIfOpenInterfaceOffloadHandle(
     _In_ XDP_IFSET_HANDLE IfSetHandle,
     _In_ CONST XDP_HOOK_ID *HookId,
-    _Out_ XDP_IF_OFFLOAD_HANDLE *InterfaceOffloadHandle
+    _Out_ VOID **InterfaceOffloadHandle
     );
 
 VOID
 XdpIfCloseInterfaceOffloadHandle(
     _In_ XDP_IFSET_HANDLE IfSetHandle,
-    _In_ XDP_IF_OFFLOAD_HANDLE InterfaceOffloadHandle
+    _In_ VOID *InterfaceOffloadHandle
     );
 
 NTSTATUS
 XdpIfGetInterfaceOffloadCapabilities(
     _In_ XDP_IFSET_HANDLE IfSetHandle,
-    _In_ XDP_IF_OFFLOAD_HANDLE InterfaceOffloadHandle,
+    _In_ VOID *InterfaceOffloadHandle,
     _In_ XDP_INTERFACE_OFFLOAD_TYPE OffloadType,
     _Out_opt_ VOID *OffloadCapabilities,
     _Inout_ UINT32 *OffloadCapabilitiesSize
@@ -125,7 +107,7 @@ XdpIfGetInterfaceOffloadCapabilities(
 NTSTATUS
 XdpIfGetInterfaceOffload(
     _In_ XDP_IFSET_HANDLE IfSetHandle,
-    _In_ XDP_IF_OFFLOAD_HANDLE InterfaceOffloadHandle,
+    _In_ VOID *InterfaceOffloadHandle,
     _In_ XDP_INTERFACE_OFFLOAD_TYPE OffloadType,
     _Out_opt_ VOID *OffloadParams,
     _Inout_ UINT32 *OffloadParamsSize
@@ -134,19 +116,17 @@ XdpIfGetInterfaceOffload(
 NTSTATUS
 XdpIfSetInterfaceOffload(
     _In_ XDP_IFSET_HANDLE IfSetHandle,
-    _In_ XDP_IF_OFFLOAD_HANDLE InterfaceOffloadHandle,
+    _In_ VOID *InterfaceOffloadHandle,
     _In_ XDP_INTERFACE_OFFLOAD_TYPE OffloadType,
     _In_ VOID *OffloadParams,
     _In_ UINT32 OffloadParamsSize
     );
 
 NTSTATUS
-XdpIfRevertInterfaceOffload(
+XdpIfReferenceInterfaceOffload(
     _In_ XDP_IFSET_HANDLE IfSetHandle,
-    _In_ XDP_IF_OFFLOAD_HANDLE InterfaceOffloadHandle,
-    _In_ XDP_INTERFACE_OFFLOAD_TYPE OffloadType,
-    _In_ VOID *OffloadParams,
-    _In_ UINT32 OffloadParamsSize
+    _In_ VOID *InterfaceOffloadHandle,
+    _In_ XDP_INTERFACE_OFFLOAD_TYPE OffloadType
     );
 
 //

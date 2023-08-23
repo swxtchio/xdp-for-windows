@@ -265,10 +265,7 @@ XdpGenericReceiveEnterEc(
     *RssQueue = XdpGenericRssGetQueue(Generic, CurrentProcessor, TxInspect, RssHash);
     if (*RssQueue == NULL) {
         //
-        // RSS is uninitialized, so pass the NBLs through. Note that the XDP
-        // interface cannot be opened, and therefore queues cannot be created,
-        // until RSS is successfully initialized. Therefore this code path is
-        // unreachable if any XDP queue exists on this interface.
+        // RSS is uninitialized, so pass the NBLs through.
         //
         NdisAppendNblChainToNblCountedQueue(PassList, *NetBufferLists);
         *NetBufferLists = NULL;
@@ -547,13 +544,11 @@ XdpGenericReceiveEnqueueTxNb(
             NdisAllocateNetBufferAndNetBufferList(
                 RxQueue->TxCloneNblPool, RX_TX_CONTEXT_SIZE, 0, NULL, 0, 0);
         if (TxNbl == NULL) {
-            STAT_INC(&RxQueue->PcwStats, ForwardingFailures);
             goto Exit;
         }
 
         RxQueue->TxCloneCacheCount++;
     } else {
-        STAT_INC(&RxQueue->PcwStats, ForwardingFailures);
         goto Exit;
     }
 
@@ -679,7 +674,6 @@ XdpGenericReceivePreInspectNbs(
         SystemVa->VirtualAddress =
             MmGetSystemAddressForMdlSafe(Mdl, LowPagePriority | MdlMappingNoExecute);
         if (SystemVa->VirtualAddress == NULL || XdpLwfFaultInject()) {
-            STAT_INC(&RxQueue->PcwStats, MappingFailures);
             goto Next;
         }
 
@@ -707,7 +701,6 @@ XdpGenericReceivePreInspectNbs(
                 }
 
                 if (!XdpGenericReceiveLinearizeNb(RxQueue, *Nb)) {
-                    STAT_INC(&RxQueue->PcwStats, LinearizationFailures);
                     goto Next;
                 }
 
@@ -741,7 +734,6 @@ XdpGenericReceivePreInspectNbs(
             SystemVa->VirtualAddress =
                 MmGetSystemAddressForMdlSafe(Mdl, LowPagePriority | MdlMappingNoExecute);
             if (SystemVa->VirtualAddress == NULL || XdpLwfFaultInject()) {
-                STAT_INC(&RxQueue->PcwStats, MappingFailures);
                 goto Next;
             }
         }
@@ -1292,9 +1284,6 @@ XdpGenericRxCreateQueue(
         .Direction  = XDP_HOOK_RX,
         .SubLayer   = XDP_HOOK_INSPECT,
     };
-    DECLARE_UNICODE_STRING_SIZE(
-        Name, ARRAYSIZE("if_" MAXUINT32_STR "_queue_" MAXUINT32_STR "_tx"));
-    const WCHAR *DirectionString;
 
     QueueInfo = XdpRxQueueGetTargetQueueInfo(Config);
 
@@ -1326,13 +1315,6 @@ XdpGenericRxCreateQueue(
         goto Exit;
     }
 
-    if (HookId.Direction == XDP_HOOK_TX) {
-        DirectionString = L"_tx";
-    } else {
-        ASSERT(HookId.Direction == XDP_HOOK_RX);
-        DirectionString = L"";
-    }
-
     RxQueue = ExAllocatePoolZero(NonPagedPoolNx, sizeof(*RxQueue), POOLTAG_RECV);
     if (RxQueue == NULL) {
         Status = STATUS_NO_MEMORY;
@@ -1345,18 +1327,6 @@ XdpGenericRxCreateQueue(
     InitializeSListHead(&RxQueue->TxCloneNblSList);
     RxQueue->TxCloneCacheLimit = RxMaxTxBuffers;
     RxQueue->Flags.TxInspect = (HookId.Direction == XDP_HOOK_TX);
-
-    Status =
-        RtlUnicodeStringPrintf(
-            &Name, L"if_%u_queue_%u%s", Generic->IfIndex, QueueInfo->QueueId, DirectionString);
-    if (!NT_SUCCESS(Status)) {
-        goto Exit;
-    }
-
-    Status = XdpPcwCreateLwfRxQueue(&RxQueue->PcwInstance, &Name, &RxQueue->PcwStats);
-    if (!NT_SUCCESS(Status)) {
-        goto Exit;
-    }
 
     PoolParams.Header.Type = NDIS_OBJECT_TYPE_DEFAULT;
     PoolParams.Header.Revision = NET_BUFFER_LIST_POOL_PARAMETERS_REVISION_1;
@@ -1447,9 +1417,6 @@ Exit:
             if (RxQueue->TxCloneNblPool != NULL) {
                 NdisFreeNetBufferListPool(RxQueue->TxCloneNblPool);
             }
-            if (RxQueue->PcwInstance != NULL) {
-                PcwCloseInstance(RxQueue->PcwInstance);
-            }
             ExFreePoolWithTag(RxQueue, POOLTAG_RECV);
         }
     }
@@ -1518,8 +1485,6 @@ XdpGenericRxDeleteQueueEntry(
     XdpGenericRxFreeNblCloneCache(RxQueue->TxCloneNblList);
     RxQueue->TxCloneNblList = NULL;
     NdisFreeNetBufferListPool(RxQueue->TxCloneNblPool);
-    XdpPcwCloseLwfRxQueue(RxQueue->PcwInstance);
-    RxQueue->PcwInstance = NULL;
     KeSetEvent(RxQueue->DeleteComplete, 0, FALSE);
     ExFreePoolWithTag(RxQueue, POOLTAG_RECV);
 }

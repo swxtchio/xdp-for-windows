@@ -15,7 +15,6 @@ FILTER_DETACH XdpLwfFilterDetach;
 FILTER_RESTART XdpLwfFilterRestart;
 FILTER_PAUSE XdpLwfFilterPause;
 FILTER_SET_MODULE_OPTIONS XdpLwfFilterSetOptions;
-FILTER_NET_PNP_EVENT XdpLwfFilterPnpEvent;
 
 NDIS_HANDLE XdpLwfNdisDriverHandle = NULL;
 UINT32 XdpLwfNdisVersion;
@@ -34,7 +33,6 @@ XdpLwfDereferenceFilter(
     )
 {
     if (XdpDecrementReferenceCount(&Filter->ReferenceCount)) {
-        XdpLwfOffloadUnInitialize(Filter);
         ExFreePoolWithTag(Filter, POOLTAG_FILTER);
     }
 }
@@ -96,18 +94,13 @@ XdpLwfBindStart(
     FChars.RestartHandler                   = XdpLwfFilterRestart;
     FChars.PauseHandler                     = XdpLwfFilterPause;
     FChars.SetFilterModuleOptionsHandler    = XdpLwfFilterSetOptions;
-    FChars.NetPnPEventHandler               = XdpLwfFilterPnpEvent;
 
 #if DBG
     FChars.OidRequestHandler                = XdpVfLwfOidRequest;
     FChars.OidRequestCompleteHandler        = XdpVfLwfOidRequestComplete;
-    FChars.DirectOidRequestHandler          = XdpVfLwfDirectOidRequest;
-    FChars.DirectOidRequestCompleteHandler  = XdpVfLwfDirectOidRequestComplete;
 #else
     FChars.OidRequestHandler                = XdpLwfOidRequest;
     FChars.OidRequestCompleteHandler        = XdpLwfOidRequestComplete;
-    FChars.DirectOidRequestHandler          = XdpLwfDirectOidRequest;
-    FChars.DirectOidRequestCompleteHandler  = XdpLwfDirectOidRequestComplete;
 #endif
 
     Status = NdisFRegisterFilterDriver(DriverObject, NULL, &FChars, &XdpLwfNdisDriverHandle);
@@ -129,6 +122,17 @@ XdpLwfBindStop(
         NdisFDeregisterFilterDriver(XdpLwfNdisDriverHandle);
         XdpLwfNdisDriverHandle = NULL;
     }
+}
+
+static
+VOID
+XdpLwfDeleteIfSetComplete(
+    _In_ VOID *InterfaceContext
+    )
+{
+    XDP_LWF_FILTER *Filter = InterfaceContext;
+
+    XdpLwfDereferenceFilter(Filter);
 }
 
 _Use_decl_annotations_
@@ -166,6 +170,7 @@ XdpLwfFilterAttach(
     Filter->NdisFilterHandle = NdisFilterHandle;
     Filter->NdisState = FilterPaused;
     XdpInitializeReferenceCount(&Filter->ReferenceCount);
+    XdpLwfOffloadInitialize(Filter);
 
     Filter->OidWorker = IoAllocateWorkItem((DEVICE_OBJECT *)XdpLwfDriverObject);
     if (Filter->OidWorker == NULL) {
@@ -173,15 +178,10 @@ XdpLwfFilterAttach(
         goto Exit;
     }
 
-    Status = XdpLwfOffloadStart(Filter);
-    if (!NT_SUCCESS(Status)) {
-        goto Exit;
-    }
-
     Status =
         XdpIfCreateInterfaceSet(
             Filter->MiniportIfIndex, &XdpLwfOffloadDispatch, Filter,
-            &Filter->XdpIfInterfaceSetHandle);
+            XdpLwfDeleteIfSetComplete, &Filter->XdpIfInterfaceSetHandle);
     if (!NT_SUCCESS(Status)) {
         ASSERT(Filter->XdpIfInterfaceSetHandle == NULL);
         Status = XdpConvertNtStatusToNdisStatus(Status);
@@ -303,35 +303,6 @@ XdpLwfFilterRestart(
     return NDIS_STATUS_SUCCESS;
 }
 
-static
-VOID
-XdpLwfFilterPreDetach(
-    _In_ XDP_LWF_FILTER *Filter
-    )
-{
-    //
-    // By the time NDIS invokes the filter detach routine, many NDIS code paths
-    // are disabled, so OID and status indications generated from this filter
-    // cant't reach other components. During orderly teardown, NDIS provides a
-    // notification that detachment is imminent while the filter can still
-    // issue OID requests and status indications.
-    //
-
-    ASSERT(!Filter->PreDetached);
-
-    Filter->PreDetached = TRUE;
-
-    if (Filter->XdpIfInterfaceSetHandle != NULL) {
-        XdpNativeDetachInterface(&Filter->Native);
-        XdpGenericDetachInterface(&Filter->Generic);
-        XdpIfDeleteInterfaceSet(Filter->XdpIfInterfaceSetHandle);
-        XdpNativeWaitForDetachInterfaceComplete(&Filter->Native);
-        XdpGenericWaitForDetachInterfaceComplete(&Filter->Generic);
-    }
-
-    XdpLwfOffloadDeactivate(Filter);
-}
-
 _Use_decl_annotations_
 VOID
 XdpLwfFilterDetach(
@@ -344,8 +315,18 @@ XdpLwfFilterDetach(
 
     TraceInfo(TRACE_GENERIC, "IfIndex=%u", Filter->MiniportIfIndex);
 
-    if (!Filter->PreDetached) {
-        XdpLwfFilterPreDetach(Filter);
+    XdpLwfOffloadDeactivate(Filter);
+
+    if (Filter->XdpIfInterfaceSetHandle != NULL) {
+        XdpNativeDetachInterface(&Filter->Native);
+        XdpGenericDetachInterface(&Filter->Generic);
+
+        //
+        // Ensure the filter remains valid until the interface set is deleted
+        // asynchronously.
+        //
+        XdpLwfReferenceFilter(Filter);
+        XdpIfDeleteInterfaceSet(Filter->XdpIfInterfaceSetHandle);
     }
 
     if (Filter->OidWorker != NULL) {
@@ -353,6 +334,8 @@ XdpLwfFilterDetach(
         IoFreeWorkItem(Filter->OidWorker);
         Filter->OidWorker = NULL;
     }
+
+    XdpLwfOffloadUnInitialize(Filter);
 
     Filter->NdisFilterHandle = NULL;
 
@@ -370,20 +353,4 @@ XdpLwfFilterSetOptions(
     ASSERT(Filter->NdisState == FilterPaused);
 
     return XdpGenericFilterSetOptions(&Filter->Generic);
-}
-
-_Use_decl_annotations_
-NDIS_STATUS
-XdpLwfFilterPnpEvent(
-    NDIS_HANDLE FilterModuleContext,
-    NET_PNP_EVENT_NOTIFICATION *NetPnPEventNotification
-    )
-{
-    XDP_LWF_FILTER *Filter = (XDP_LWF_FILTER *)FilterModuleContext;
-
-    if (NetPnPEventNotification->NetPnPEvent.NetEvent == NetEventFilterPreDetach) {
-        XdpLwfFilterPreDetach(Filter);
-    }
-
-    return NdisFNetPnPEvent(Filter->NdisFilterHandle, NetPnPEventNotification);
 }

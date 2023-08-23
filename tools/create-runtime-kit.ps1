@@ -13,17 +13,14 @@ param (
 
     [ValidateSet("Debug", "Release")]
     [Parameter(Mandatory=$false)]
-    [string]$Config = "Debug"
+    [string]$Flavor = "Debug"
 )
-
-Set-StrictMode -Version 'Latest'
-$ErrorActionPreference = 'Stop'
 
 $RootDir = Split-Path $PSScriptRoot -Parent
 . $RootDir\tools\common.ps1
 
 $Name = "xdp-runtime-$Platform"
-if ($Config -eq "Debug") {
+if ($Flavor -eq "Debug") {
     $Name += "-debug"
 }
 $DstPath = "artifacts\kit\$Name"
@@ -34,22 +31,25 @@ New-Item -Path $DstPath -ItemType Directory > $null
 copy docs\usage.md $DstPath
 
 New-Item -Path $DstPath\bin -ItemType Directory > $null
-copy "artifacts\bin\$($Platform)_$($Config)\CoreNetSignRoot.cer" $DstPath\bin
-copy "artifacts\bin\$($Platform)_$($Config)\xdpinstaller\xdp-for-windows.msi" $DstPath\bin
+copy "artifacts\bin\$($Platform)_$($Flavor)\CoreNetSignRoot.cer" $DstPath\bin
+copy "artifacts\bin\$($Platform)_$($Flavor)\xdp\xdp.inf" $DstPath\bin
+copy "artifacts\bin\$($Platform)_$($Flavor)\xdp\xdp.sys" $DstPath\bin
+copy "artifacts\bin\$($Platform)_$($Flavor)\xdp\xdp.cat" $DstPath\bin
+copy "artifacts\bin\$($Platform)_$($Flavor)\xdp\xdpapi.dll" $DstPath\bin
 
 New-Item -Path $DstPath\symbols -ItemType Directory > $null
-copy "artifacts\bin\$($Platform)_$($Config)\xdp.pdb"   $DstPath\symbols
-copy "artifacts\bin\$($Platform)_$($Config)\xdpapi.pdb" $DstPath\symbols
-copy "artifacts\bin\$($Platform)_$($Config)\xdpcfg.pdb" $DstPath\symbols
+copy "artifacts\bin\$($Platform)_$($Flavor)\xdp.pdb"   $DstPath\symbols
+copy "artifacts\bin\$($Platform)_$($Flavor)\xdpapi.pdb" $DstPath\symbols
 
-[xml]$XdpVersion = Get-Content $RootDir\src\xdp.props
+
+[xml]$XdpVersion = Get-Content $RootDir\xdp.props
 $Major = $XdpVersion.Project.PropertyGroup.XdpMajorVersion
 $Minor = $XdpVersion.Project.PropertyGroup.XdpMinorVersion
 $Patch = $XdpVersion.Project.PropertyGroup.XdpPatchVersion
 
 $VersionString = "$Major.$Minor.$Patch"
 
-if (!(Is-ReleaseBuild)) {
+if (!((Get-BuildBranch).StartsWith("release/"))) {
     $VersionString += "-prerelease+" + (git.exe describe --long --always --dirty --exclude=* --abbrev=8)
 }
 

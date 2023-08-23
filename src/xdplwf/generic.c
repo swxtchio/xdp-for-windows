@@ -727,15 +727,6 @@ XdpGenericDetachInterface(
         // Initiate core XDP cleanup and wait for completion.
         //
         XdpIfRemoveInterfaces(&Generic->XdpIfInterfaceHandle, 1);
-    }
-}
-
-VOID
-XdpGenericWaitForDetachInterfaceComplete(
-    _In_ XDP_LWF_GENERIC *Generic
-    )
-{
-    if (Generic->XdpIfInterfaceHandle != NULL) {
         KeWaitForSingleObject(
             &Generic->InterfaceRemovedEvent, Executive, KernelMode, FALSE, NULL);
         Generic->XdpIfInterfaceHandle = NULL;
@@ -752,8 +743,6 @@ XdpGenericStart(
     )
 {
     XdpRegWatcherAddClient(XdpLwfRegWatcher, XdpGenericRegistryUpdate, &GenericRegWatcher);
-    XdpPcwRegisterLwfRxQueue(NULL, NULL);
-    XdpPcwRegisterLwfTxQueue(NULL, NULL);
 
     return STATUS_SUCCESS;
 }
@@ -763,13 +752,5 @@ XdpGenericStop(
     VOID
     )
 {
-    if (XdpPcwLwfTxQueue != NULL) {
-        PcwUnregister(XdpPcwLwfTxQueue);
-        XdpPcwLwfTxQueue = NULL;
-    }
-    if (XdpPcwLwfRxQueue != NULL) {
-        PcwUnregister(XdpPcwLwfRxQueue);
-        XdpPcwLwfRxQueue = NULL;
-    }
     XdpRegWatcherRemoveClient(XdpLwfRegWatcher, &GenericRegWatcher);
 }

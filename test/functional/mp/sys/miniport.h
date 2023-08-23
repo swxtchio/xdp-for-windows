@@ -70,10 +70,10 @@ typedef struct _ADAPTER_CONTEXT {
     ADAPTER_OFFLOAD OffloadConfig;
     ADAPTER_OFFLOAD OffloadCapabilities;
 
-    KSPIN_LOCK Lock;
+    EX_PUSH_LOCK Lock;
     OID_KEY *OidFilterKeys;
     UINT32 OidFilterKeyCount;
-    LIST_ENTRY FilteredOidRequestLists[OID_REQUEST_INTERFACE_MAX];
+    NDIS_OID_REQUEST *FilteredOidRequest;
 
     //
     // Context for an exclusive user mode handle for configuring the adapter.

@@ -22,7 +22,7 @@ param (
 )
 
 Set-StrictMode -Version 'Latest'
-$ErrorActionPreference = 'Stop'
+$PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
 
 # Important paths.
 $RootDir = Split-Path $PSScriptRoot -Parent

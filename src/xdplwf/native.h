@@ -28,8 +28,3 @@ VOID
 XdpNativeDetachInterface(
     _In_ XDP_LWF_NATIVE *Native
     );
-
-VOID
-XdpNativeWaitForDetachInterfaceComplete(
-    _In_ XDP_LWF_NATIVE *Native
-    );

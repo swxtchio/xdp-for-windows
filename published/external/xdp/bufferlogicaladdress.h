@@ -10,7 +10,13 @@ EXTERN_C_START
 #pragma warning(push)
 #pragma warning(default:4820) // warn if the compiler inserted padding
 
+//
+// XDP buffer extension containing the device-logical buffer address.
+//
 typedef struct _XDP_BUFFER_LOGICAL_ADDRESS {
+    //
+    // Contains the device logical address of a buffer.
+    //
     UINT64 LogicalAddress;
 } XDP_BUFFER_LOGICAL_ADDRESS;
 
@@ -24,6 +30,9 @@ C_ASSERT(sizeof(XDP_BUFFER_LOGICAL_ADDRESS) == sizeof(VOID *));
 #include <xdp/datapath.h>
 #include <xdp/extension.h>
 
+//
+// Returns the logical address extension for the given XDP buffer.
+//
 inline
 XDP_BUFFER_LOGICAL_ADDRESS *
 XdpGetLogicalAddressExtension(

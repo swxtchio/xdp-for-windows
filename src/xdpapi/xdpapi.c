@@ -5,14 +5,13 @@
 
 #include "precomp.h"
 
-//
-// API routines.
-//
 XDP_OPEN_API_FN XdpOpenApi;
 XDP_CLOSE_API_FN XdpCloseApi;
-XDP_GET_ROUTINE_FN XdpGetRoutine;
 XDP_CREATE_PROGRAM_FN XdpCreateProgram;
 XDP_INTERFACE_OPEN_FN XdpInterfaceOpen;
+XDP_RSS_GET_CAPABILITIES_FN XdpRssGetCapabilities;
+XDP_RSS_SET_FN XdpRssSet;
+XDP_RSS_GET_FN XdpRssGet;
 XSK_CREATE_FN XskCreate;
 XSK_BIND_FN XskBind;
 XSK_ACTIVATE_FN XskActivate;
@@ -23,49 +22,14 @@ XSK_SET_SOCKOPT_FN XskSetSockopt;
 XSK_GET_SOCKOPT_FN XskGetSockopt;
 XSK_IOCTL_FN XskIoctl;
 
-//
-// Experimental APIs, subject to removal in a minor release.
-//
-XDP_RSS_GET_CAPABILITIES_FN XdpRssGetCapabilities;
-XDP_RSS_SET_FN XdpRssSet;
-XDP_RSS_GET_FN XdpRssGet;
-XDP_QEO_SET_FN XdpQeoSet;
-
-typedef struct _XDP_API_ROUTINE {
-    _Null_terminated_ const CHAR *RoutineName;
-    VOID *Routine;
-} XDP_API_ROUTINE;
-
-#define DECLARE_XDP_API_ROUTINE(_routine) #_routine, (VOID *)_routine
-#define DECLARE_EXPERIMENTAL_XDP_API_ROUTINE(_routine, _name) _name, (VOID *)_routine
-
-static const XDP_API_ROUTINE XdpApiRoutines[] = {
-    { DECLARE_XDP_API_ROUTINE(XdpOpenApi) },
-    { DECLARE_XDP_API_ROUTINE(XdpCloseApi) },
-    { DECLARE_XDP_API_ROUTINE(XdpGetRoutine) },
-    { DECLARE_XDP_API_ROUTINE(XdpCreateProgram) },
-    { DECLARE_XDP_API_ROUTINE(XdpInterfaceOpen) },
-    { DECLARE_XDP_API_ROUTINE(XskCreate) },
-    { DECLARE_XDP_API_ROUTINE(XskBind) },
-    { DECLARE_XDP_API_ROUTINE(XskActivate) },
-    { DECLARE_XDP_API_ROUTINE(XskNotifySocket) },
-    { DECLARE_XDP_API_ROUTINE(XskNotifyAsync) },
-    { DECLARE_XDP_API_ROUTINE(XskGetNotifyAsyncResult) },
-    { DECLARE_XDP_API_ROUTINE(XskSetSockopt) },
-    { DECLARE_XDP_API_ROUTINE(XskGetSockopt) },
-    { DECLARE_XDP_API_ROUTINE(XskIoctl) },
-    { DECLARE_EXPERIMENTAL_XDP_API_ROUTINE(XdpRssGetCapabilities, XDP_RSS_GET_CAPABILITIES_FN_NAME) },
-    { DECLARE_EXPERIMENTAL_XDP_API_ROUTINE(XdpRssSet, XDP_RSS_SET_FN_NAME) },
-    { DECLARE_EXPERIMENTAL_XDP_API_ROUTINE(XdpRssGet, XDP_RSS_GET_FN_NAME) },
-    { DECLARE_EXPERIMENTAL_XDP_API_ROUTINE(XdpQeoSet, XDP_QEO_SET_FN_NAME) },
-};
-
-static CONST XDP_API_TABLE XdpApiTableV1 = {
+static CONST XDP_API_TABLE XdpApiTablePrerelease = {
     .XdpOpenApi = XdpOpenApi,
     .XdpCloseApi = XdpCloseApi,
-    .XdpGetRoutine = XdpGetRoutine,
     .XdpCreateProgram = XdpCreateProgram,
     .XdpInterfaceOpen = XdpInterfaceOpen,
+    .XdpRssGetCapabilities = XdpRssGetCapabilities,
+    .XdpRssSet = XdpRssSet,
+    .XdpRssGet = XdpRssGet,
     .XskCreate = XskCreate,
     .XskBind = XskBind,
     .XskActivate = XskActivate,
@@ -86,11 +50,11 @@ XdpOpenApi(
 {
     *XdpApiTable = NULL;
 
-    if (XdpApiVersion != XDP_API_VERSION_1) {
+    if (XdpApiVersion != XDP_VERSION_PRERELEASE) {
         return E_NOINTERFACE;
     }
 
-    *XdpApiTable = &XdpApiTableV1;
+    *XdpApiTable = &XdpApiTablePrerelease;
 
     return S_OK;
 }
@@ -101,21 +65,7 @@ XdpCloseApi(
     _In_ CONST XDP_API_TABLE *XdpApiTable
     )
 {
-    FRE_ASSERT(XdpApiTable == &XdpApiTableV1);
-}
-
-VOID *
-XdpGetRoutine(
-    _In_z_ const CHAR *RoutineName
-    )
-{
-    for (UINT32 i = 0; i < RTL_NUMBER_OF(XdpApiRoutines); i++) {
-        if (strcmp(XdpApiRoutines[i].RoutineName, RoutineName) == 0) {
-            return XdpApiRoutines[i].Routine;
-        }
-    }
-
-    return NULL;
+    FRE_ASSERT(XdpApiTable == &XdpApiTablePrerelease);
 }
 
 HRESULT
@@ -123,7 +73,7 @@ XdpCreateProgram(
     _In_ UINT32 InterfaceIndex,
     _In_ CONST XDP_HOOK_ID *HookId,
     _In_ UINT32 QueueId,
-    _In_ XDP_CREATE_PROGRAM_FLAGS Flags,
+    _In_ UINT32 Flags,
     _In_reads_(RuleCount) CONST XDP_RULE *Rules,
     _In_ UINT32 RuleCount,
     _Out_ HANDLE *Program
@@ -218,26 +168,6 @@ XdpRssGet(
         XdpIoctl(
             InterfaceHandle, IOCTL_INTERFACE_OFFLOAD_RSS_GET, NULL, 0, RssConfiguration,
             *RssConfigurationSize, (ULONG *)RssConfigurationSize, NULL, TRUE);
-    if (!Success) {
-        return HRESULT_FROM_WIN32(GetLastError());
-    }
-
-    return S_OK;
-}
-
-HRESULT
-XdpQeoSet(
-    _In_ HANDLE InterfaceHandle,
-    _Inout_ XDP_QUIC_CONNECTION *QuicConnections,
-    _In_ UINT32 QuicConnectionsSize
-    )
-{
-    BOOL Success =
-        XdpIoctl(
-            InterfaceHandle, IOCTL_INTERFACE_OFFLOAD_QEO_SET,
-            QuicConnections, QuicConnectionsSize,
-            QuicConnections, QuicConnectionsSize,
-            (ULONG *)&QuicConnectionsSize, NULL, TRUE);
     if (!Success) {
         return HRESULT_FROM_WIN32(GetLastError());
     }

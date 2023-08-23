@@ -200,11 +200,6 @@ XdpIrpDispatch(
 
     IrpSp = IoGetCurrentIrpStackLocation(Irp);
 
-    //
-    // Ensure threads cannot be frozen by user mode within any driver routines.
-    //
-    KeEnterCriticalRegion();
-
     switch (IrpSp->MajorFunction) {
     case IRP_MJ_CREATE:
         Status = XdpIrpCreate(Irp, IrpSp);
@@ -221,8 +216,6 @@ XdpIrpDispatch(
     default:
         break;
     }
-
-    KeLeaveCriticalRegion();
 
     if (Status != STATUS_PENDING) {
         Irp->IoStatus.Status = Status;
@@ -252,11 +245,6 @@ XdpIrpDeviceIoControl(
     IrpSp = IoGetCurrentIrpStackLocation(Irp);
     FileHeader = IrpSp->FileObject->FsContext;
 
-    //
-    // Ensure threads cannot be frozen by user mode within any driver routines.
-    //
-    KeEnterCriticalRegion();
-
     if (FileHeader != NULL) {
         if (FileHeader->Dispatch->IoControl != NULL) {
             Status = FileHeader->Dispatch->IoControl(Irp, IrpSp);
@@ -272,8 +260,6 @@ XdpIrpDeviceIoControl(
     }
 
 Exit:
-
-    KeLeaveCriticalRegion();
 
     if (Status != STATUS_PENDING) {
         Irp->IoStatus.Status = Status;
@@ -488,10 +474,9 @@ XdpStart(
     }
 
     Status =
-        IoCreateDeviceSecure(
+        IoCreateDevice(
             XdpDriverObject, 0, (PUNICODE_STRING)&DeviceName, FILE_DEVICE_NETWORK,
-            FILE_DEVICE_SECURE_OPEN, FALSE, &SDDL_DEVOBJ_SYS_ALL_ADM_ALL, &XDP_DEVICE_CLASS_GUID,
-            &XdpDeviceObject);
+            FILE_DEVICE_SECURE_OPEN, FALSE, &XdpDeviceObject);
     if (!NT_SUCCESS(Status)) {
         goto Exit;
     }
@@ -537,11 +522,6 @@ DriverEntry(
         goto Exit;
     }
 
-    Status = XdpRtlStart();
-    if (!NT_SUCCESS(Status)) {
-        goto Exit;
-    }
-
     Status = XdpStart();
     if (!NT_SUCCESS(Status)) {
         goto Exit;
@@ -575,7 +555,6 @@ DriverUnload(
 
     XdpLwfStop();
     XdpStop();
-    XdpRtlStop();
 
     TraceExitStatus(TRACE_CORE);
 

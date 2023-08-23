@@ -16,7 +16,6 @@ NDIS_STRING RegNumRxBuffers = NDIS_STRING_CONST("NumRxBuffers");
 NDIS_STRING RegRxBufferLength = NDIS_STRING_CONST("RxBufferLength");
 NDIS_STRING RegRxDataLength = NDIS_STRING_CONST("RxDataLength");
 NDIS_STRING RegRxPattern = NDIS_STRING_CONST("RxPattern");
-NDIS_STRING RegRxPatternCopy = NDIS_STRING_CONST("RxPatternCopy");
 NDIS_STRING RegPollProvider = NDIS_STRING_CONST("PollProvider");
 
 PCSTR MpDriverFriendlyName = "XDPMP";
@@ -82,6 +81,7 @@ NDIS_OID MpSupportedOidArray[] =
     OID_GEN_VENDOR_DESCRIPTION,
     OID_GEN_CURRENT_PACKET_FILTER,
     OID_GEN_CURRENT_LOOKAHEAD,
+    OID_GEN_DRIVER_VERSION,
     OID_GEN_MAXIMUM_TOTAL_SIZE,
     OID_GEN_MAC_OPTIONS,
     OID_GEN_MEDIA_CONNECT_STATUS,
@@ -684,6 +684,7 @@ DriverEntry(
         //
         MChars.MajorNdisVersion = 6;
         MChars.MinorNdisVersion = 85;
+#ifdef FNDIS
     } else if (MpGlobalContext.NdisVersion >= NDIS_RUNTIME_VERSION_682) {
         //
         // RS5 / 17763 / Windows 1809 / Windows Server 2019 or higher.
@@ -696,6 +697,7 @@ DriverEntry(
         //
         MChars.MajorNdisVersion = 6;
         MChars.MinorNdisVersion = 60;
+#endif
     } else {
         Status = NDIS_STATUS_NOT_SUPPORTED;
         goto Exit;
@@ -1025,10 +1027,6 @@ MpReadConfiguration(
         }
     }
 
-    Adapter->RxPatternCopy = 0;
-    TRY_READ_INT_CONFIGURATION(ConfigHandle, RegRxPatternCopy, &Adapter->RxPatternCopy);
-    Adapter->RxPatternCopy = !!Adapter->RxPatternCopy;
-
     Adapter->RateSim.IntervalUs = 1000;             // 1ms
     Adapter->RateSim.RxFramesPerInterval = 1000;    // 1Mpps
     Adapter->RateSim.TxFramesPerInterval = 1000;    // 1Mpps
@@ -1195,6 +1193,11 @@ MpQueryInformationHandler(
 
         case OID_GEN_CURRENT_PACKET_FILTER:
             DataPointer = &Adapter->CurrentPacketFilter;
+            break;
+
+        case OID_GEN_DRIVER_VERSION:
+            DataLength = sizeof(USHORT);
+            Data = 0x650;
             break;
 
         case OID_GEN_MAC_OPTIONS:

@@ -12,6 +12,10 @@
 
 #include <windows.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 VOID
 StopTest();
 
@@ -32,3 +36,7 @@ LogTestWarning(
     _Printf_format_string_ PCWSTR Format,
     ...
     );
+
+#ifdef __cplusplus
+} /* extern "C" */
+#endif

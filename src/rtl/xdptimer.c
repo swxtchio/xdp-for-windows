@@ -4,7 +4,6 @@
 //
 
 #include "precomp.h"
-#include "xdptimer.tmh"
 
 typedef struct _EX_TIMER EX_TIMER;
 typedef struct _IO_WORKITEM IO_WORKITEM;
@@ -57,8 +56,6 @@ XdpTimerDereference(
         if (CleanupEvent != NULL) {
             KeSetEvent(CleanupEvent, 0, FALSE);
         }
-
-        ExReleaseRundownProtection(&XdpRtlRundown);
     }
 }
 
@@ -78,10 +75,6 @@ XdpTimerCreate(
 
     ASSERT((DriverObject != NULL) || (DeviceObject != NULL));
     IoObject = (DriverObject != NULL) ? (VOID *)DriverObject : DeviceObject;
-
-    if (!ExAcquireRundownProtection(&XdpRtlRundown)) {
-        return NULL;
-    }
 
     Timer =
         ExAllocatePoolZero(NonPagedPoolNx, sizeof(*Timer) + IoSizeofWorkItem(), XDP_POOLTAG_TIMER);
@@ -112,8 +105,6 @@ Exit:
             XdpTimerDereference(Timer);
             Timer = NULL;
         }
-
-        ExReleaseRundownProtection(&XdpRtlRundown);
     }
 
     return Timer;
@@ -348,8 +339,7 @@ XdpTimerWorker(
     KIRQL OldIrql;
     KEVENT *CancelEvent = NULL;
 
-    TraceEnter(TRACE_RTL, "Timer=%p IoObject=%p", Timer, IoObject);
-
+    UNREFERENCED_PARAMETER(IoObject);
     UNREFERENCED_PARAMETER(IoWorkItem);
     ASSERT(Timer);
 
@@ -371,12 +361,6 @@ XdpTimerWorker(
     if (CancelEvent == NULL) {
         Timer->TimerRoutine(Timer->TimerContext);
     }
-
-    //
-    // The work queue holds an indirect reference on the ETW tracing provider,
-    // so trace exit prematurely to ensure the log isn't dropped.
-    //
-    TraceExitSuccess(TRACE_RTL);
 
     XdpTimerDereference(Timer);
 }
