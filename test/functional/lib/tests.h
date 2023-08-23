@@ -101,6 +101,9 @@ GenericRxFromTxInspect(
     );
 
 VOID
+SecurityAdjustDeviceAcl();
+
+VOID
 GenericRxEbpfAttach();
 
 VOID
@@ -196,7 +199,27 @@ VOID
 OffloadRssCapabilities();
 
 VOID
+OffloadRssReset();
+
+VOID
 OffloadSetHardwareCapabilities();
 
 VOID
 GenericXskQueryAffinity();
+
+VOID
+OffloadQeoConnection();
+
+typedef enum _REVERT_REASON {
+    RevertReasonInterfaceRemoval,
+    RevertReasonHandleClosure,
+} REVERT_REASON;
+
+VOID
+OffloadQeoRevert(
+    _In_ REVERT_REASON RevertReason
+    );
+
+VOID
+OffloadQeoOidFailure(
+    );

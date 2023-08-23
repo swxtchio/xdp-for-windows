@@ -333,6 +333,12 @@ XdpEcCleanup(
         Ec->CleanupComplete = NULL;
 
         Ec->CleanupPassiveThread = TRUE;
+        //
+        // Rather than setting the priority boost while setting the event, which
+        // is effective only if the thread was not already READY, permanently
+        // boost the thread priority to expedite cleanup.
+        //
+        KeSetPriorityThread(Ec->PassiveThread, LOW_REALTIME_PRIORITY);
         KeSetEvent(&Ec->PassiveEvent, 0, FALSE);
         KeWaitForSingleObject(Ec->PassiveThread, Executive, KernelMode, FALSE, NULL);
         ObDereferenceObject(Ec->PassiveThread);
@@ -357,10 +363,11 @@ XdpEcInitialize(
     Ec->Poll = Poll;
     Ec->PollContext = PollContext;
     Ec->IdealProcessor = IdealProcessor;
+    Ec->OwningProcessor = ReadULongNoFence(IdealProcessor);
     Ec->Armed = TRUE;
 
     KeInitializeDpc(&Ec->Dpc, XdpEcDpcThunk, Ec);
-    KeGetProcessorNumberFromIndex(*Ec->IdealProcessor, &ProcessorNumber);
+    KeGetProcessorNumberFromIndex(Ec->OwningProcessor, &ProcessorNumber);
     KeSetTargetProcessorDpcEx(&Ec->Dpc, &ProcessorNumber);
     KeInitializeEvent(&Ec->PassiveEvent, SynchronizationEvent, FALSE);
 

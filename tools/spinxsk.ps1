@@ -79,19 +79,24 @@ param (
     [string]$XdpmpPollProvider = "NDIS",
 
     [Parameter(Mandatory = $false)]
-    [switch]$EnableEbpf = $false
+    [switch]$EnableEbpf = $false,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$EbpfPreinstalled = $false
 )
 
 Set-StrictMode -Version 'Latest'
-$PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
+$ErrorActionPreference = 'Stop'
 
 # Important paths.
 $RootDir = Split-Path $PSScriptRoot -Parent
+. $RootDir\tools\common.ps1
+
 $ArtifactsDir = "$RootDir\artifacts\bin\$($Arch)_$($Config)"
 $LogsDir = "$RootDir\artifacts\logs"
 $SpinXsk = "$ArtifactsDir\spinxsk.exe"
-$LiveKD = "C:\livekd64.exe"
-$KD = "C:\kd.exe"
+$LiveKD = Get-CoreNetCiArtifactPath -Name "livekd64.exe"
+$KD = Get-CoreNetCiArtifactPath -Name "kd.exe"
 
 # Verify all the files are present.
 if (!(Test-Path $SpinXsk)) {
@@ -116,6 +121,7 @@ while (($Minutes -eq 0) -or (((Get-Date)-$StartTime).TotalMinutes -lt $Minutes))
     try {
         if (!$NoLogs) {
             & "$RootDir\tools\log.ps1" -Start -Name spinxsk -Profile SpinXsk.Verbose -Config $Config -Arch $Arch
+            & "$RootDir\tools\log.ps1" -Start -Name spinxskebpf -Profile SpinXskEbpf.Verbose -LogMode Memory -Config $Config -Arch $Arch
             & "$RootDir\tools\log.ps1" -Start -Name spinxskcpu -Profile CpuCswitchSample.Verbose -Config $Config -Arch $Arch
         }
         if ($XdpmpPollProvider -eq "FNDIS") {
@@ -132,9 +138,11 @@ while (($Minutes -eq 0) -or (((Get-Date)-$StartTime).TotalMinutes -lt $Minutes))
         & "$RootDir\tools\setup.ps1" -Install xdpmp -XdpmpPollProvider $XdpmpPollProvider -Config $Config -Arch $Arch
         Write-Verbose "installed xdpmp."
 
-        Write-Verbose "installing ebpf..."
-        & "$RootDir\tools\setup.ps1" -Install ebpf -Config $Config -Arch $Arch
-        Write-Verbose "installed ebpf."
+        if (!$EbpfPreinstalled) {
+            Write-Verbose "installing ebpf..."
+            & "$RootDir\tools\setup.ps1" -Install ebpf -Config $Config -Arch $Arch
+            Write-Verbose "installed ebpf."
+        }
 
         Write-Verbose "Set-NetAdapterRss XDPMP -NumberOfReceiveQueues $QueueCount"
         Set-NetAdapterRss XDPMP -NumberOfReceiveQueues $QueueCount
@@ -172,7 +180,9 @@ while (($Minutes -eq 0) -or (((Get-Date)-$StartTime).TotalMinutes -lt $Minutes))
             throw "SpinXsk failed with $LastExitCode"
         }
     } finally {
-        & "$RootDir\tools\setup.ps1" -Uninstall ebpf -Config $Config -Arch $Arch -ErrorAction 'Continue'
+        if (!$EbpfPreinstalled) {
+            & "$RootDir\tools\setup.ps1" -Uninstall ebpf -Config $Config -Arch $Arch -ErrorAction 'Continue'
+        }
         & "$RootDir\tools\setup.ps1" -Uninstall xdpmp -Config $Config -Arch $Arch -ErrorAction 'Continue'
         & "$RootDir\tools\setup.ps1" -Uninstall xdp -Config $Config -Arch $Arch -ErrorAction 'Continue'
         if ($XdpmpPollProvider -eq "FNDIS") {
@@ -180,6 +190,7 @@ while (($Minutes -eq 0) -or (((Get-Date)-$StartTime).TotalMinutes -lt $Minutes))
         }
         if (!$NoLogs) {
             & "$RootDir\tools\log.ps1" -Stop -Name spinxskcpu -Config $Config -Arch $Arch -ErrorAction 'Continue'
+            & "$RootDir\tools\log.ps1" -Stop -Name spinxskebpf -Config $Config -Arch $Arch -ErrorAction 'Continue'
             & "$RootDir\tools\log.ps1" -Stop -Name spinxsk -Config $Config -Arch $Arch -ErrorAction 'Continue'
         }
     }

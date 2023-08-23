@@ -1,6 +1,6 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <Import Project="$(SolutionDir)xdp.props" />
+  <Import Project="$(SolutionDir)src\xdp.props" />
   <Import Project="$(EbpfPackagePath)build\native\ebpf-for-windows.props" Condition="Exists('$(EbpfPackagePath)build\native\ebpf-for-windows.props')" />
   <PropertyGroup Label="Globals">
     <VCProjectVersion>16.0</VCProjectVersion>
@@ -9,13 +9,13 @@
     <RootNamespace>bpf</RootNamespace>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
-  <Import Project="$(SolutionDir)xdp.cpp.default.props" />
+  <Import Project="$(SolutionDir)src\xdp.cpp.default.props" />
   <PropertyGroup Label="Configuration">
     <ConfigurationType>Utility</ConfigurationType>
     <PlatformToolset>$(XdpPlatformToolset)</PlatformToolset>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
-  <Import Project="$(SolutionDir)xdp.cpp.props" />
+  <Import Project="$(SolutionDir)src\xdp.cpp.props" />
   <ImportGroup Label="ExtensionSettings" />
   <ImportGroup Label="PropertySheets">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
@@ -32,7 +32,7 @@
       <Command>
         clang -g -target bpf -O2 -Werror $(ClangIncludes) -c %(Filename).c -o $(OutDir)%(Filename).o
         pushd $(OutDir)
-        powershell -NonInteractive -ExecutionPolicy Unrestricted $(EbpfBinPath)\Convert-BpfToNative.ps1 -ProgramName %(Filename) -IncludeDir $(EbpfIncludePath) -Platform $(Platform) -Configuration $(Configuration) -KernelMode $true
+        powershell -NonInteractive -ExecutionPolicy Unrestricted $(EbpfBinPath)\Convert-BpfToNative.ps1 -FileName %(Filename) -IncludeDir $(EbpfIncludePath) -Platform $(Platform) -Configuration $(Configuration) -KernelMode $true
         rmdir /s /q $(OutDir)\allow_ipv6_km
         popd</Command>
     </CustomBuild>
@@ -42,7 +42,7 @@
       <Command>
         clang -g -target bpf -O2 -Werror $(ClangIncludes) -c %(Filename).c -o $(OutDir)%(Filename).o
         pushd $(OutDir)
-        powershell -NonInteractive -ExecutionPolicy Unrestricted $(EbpfBinPath)\Convert-BpfToNative.ps1 -ProgramName %(Filename) -IncludeDir $(EbpfIncludePath) -Platform $(Platform) -Configuration $(Configuration) -KernelMode $true
+        powershell -NonInteractive -ExecutionPolicy Unrestricted $(EbpfBinPath)\Convert-BpfToNative.ps1 -FileName %(Filename) -IncludeDir $(EbpfIncludePath) -Platform $(Platform) -Configuration $(Configuration) -KernelMode $true
         rmdir /s /q $(OutDir)\drop_km
         popd</Command>
     </CustomBuild>
@@ -52,8 +52,8 @@
       <Command>
         clang -g -target bpf -O2 -Werror $(ClangIncludes) -c %(Filename).c -o $(OutDir)%(Filename).o
         pushd $(OutDir)
-        powershell -NonInteractive -ExecutionPolicy Unrestricted $(EbpfBinPath)\Convert-BpfToNative.ps1 -ProgramName %(Filename) -IncludeDir $(EbpfIncludePath) -Platform $(Platform) -Configuration $(Configuration) -KernelMode $true
-        rmdir /s /q $(OutDir)\l1fwd_km
+        powershell -NonInteractive -ExecutionPolicy Unrestricted $(EbpfBinPath)\Convert-BpfToNative.ps1 -FileName %(Filename) -IncludeDir $(EbpfIncludePath) -Platform $(Platform) -Configuration $(Configuration) -KernelMode $true
+        rmdir /s /q $(OutDir)\l1fwd_km-
         popd</Command>
     </CustomBuild>
     <CustomBuild Include="pass.c">
@@ -62,7 +62,7 @@
       <Command>
         clang -g -target bpf -O2 -Werror $(ClangIncludes) -c %(Filename).c -o $(OutDir)%(Filename).o
         pushd $(OutDir)
-        powershell -NonInteractive -ExecutionPolicy Unrestricted $(EbpfBinPath)\Convert-BpfToNative.ps1 -ProgramName %(Filename) -IncludeDir $(EbpfIncludePath) -Platform $(Platform) -Configuration $(Configuration) -KernelMode $true
+        powershell -NonInteractive -ExecutionPolicy Unrestricted $(EbpfBinPath)\Convert-BpfToNative.ps1 -FileName %(Filename) -IncludeDir $(EbpfIncludePath) -Platform $(Platform) -Configuration $(Configuration) -KernelMode $true
         rmdir /s /q $(OutDir)\pass_km
         popd</Command>
     </CustomBuild>

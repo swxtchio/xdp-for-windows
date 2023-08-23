@@ -371,8 +371,8 @@ XdpGenericRssInitialize(
 
     Status =
         XdpLwfOidInternalRequest(
-            Generic->NdisFilterHandle, NdisRequestQueryInformation,
-            OID_GEN_RECEIVE_SCALE_CAPABILITIES, &RssCaps,
+            Generic->NdisFilterHandle, XDP_OID_REQUEST_INTERFACE_REGULAR,
+            NdisRequestQueryInformation, OID_GEN_RECEIVE_SCALE_CAPABILITIES, &RssCaps,
             sizeof(RssCaps), 0, 0, &BytesReturned);
     if (!NT_SUCCESS(Status) && Status != STATUS_NOT_SUPPORTED) {
         goto Exit;
@@ -452,15 +452,11 @@ XdpGenericRssInitialize(
     //
     // Attempt to query the indirection table.
     //
-    // TODO: how do we avoid a race with the protocol driver plumbing RSS? The
-    // OID might already be in flight before this LWF has a chance to inspect it
-    // and might still be in flight after we query NDIS.
-    //
 
     Status =
         XdpLwfOidInternalRequest(
-            Generic->NdisFilterHandle, NdisRequestQueryInformation,
-            OID_GEN_RECEIVE_SCALE_PARAMETERS, RssParams, 0, 0, 0,
+            Generic->NdisFilterHandle, XDP_OID_REQUEST_INTERFACE_REGULAR,
+            NdisRequestQueryInformation, OID_GEN_RECEIVE_SCALE_PARAMETERS, RssParams, 0, 0, 0,
             &BytesReturned);
     if (Status != STATUS_BUFFER_TOO_SMALL || BytesReturned == 0) {
         if (Status == STATUS_NOT_SUPPORTED) {
@@ -479,9 +475,9 @@ XdpGenericRssInitialize(
 
     Status =
         XdpLwfOidInternalRequest(
-            Generic->NdisFilterHandle, NdisRequestQueryInformation,
-            OID_GEN_RECEIVE_SCALE_PARAMETERS, RssParams, BytesReturned, 0, 0,
-            &BytesReturned);
+            Generic->NdisFilterHandle, XDP_OID_REQUEST_INTERFACE_REGULAR,
+            NdisRequestQueryInformation, OID_GEN_RECEIVE_SCALE_PARAMETERS, RssParams, BytesReturned,
+            0, 0, &BytesReturned);
     if (!NT_SUCCESS(Status)) {
         goto Exit;
     }

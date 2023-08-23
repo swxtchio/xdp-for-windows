@@ -10,12 +10,6 @@
 #include "precomp.h"
 #include "offload.tmh"
 
-typedef struct _XDP_INTERFACE_OBJECT {
-    XDP_FILE_OBJECT_HEADER Header;
-    XDP_IFSET_HANDLE IfSetHandle;
-    VOID *InterfaceOffloadHandle;
-} XDP_INTERFACE_OBJECT;
-
 static XDP_FILE_IRP_ROUTINE XdpIrpInterfaceDeviceIoControl;
 static XDP_FILE_IRP_ROUTINE XdpIrpInterfaceClose;
 static XDP_FILE_DISPATCH XdpInterfaceFileDispatch = {
@@ -354,6 +348,14 @@ Exit:
     return Status;
 }
 
+VOID
+XdpOffloadInitializeIfSettings(
+    _Out_ XDP_OFFLOAD_IF_SETTINGS *OffloadIfSettings
+    )
+{
+    XdpOffloadQeoInitializeSettings(&OffloadIfSettings->Qeo);
+}
+
 _IRQL_requires_max_(PASSIVE_LEVEL)
 _IRQL_requires_same_
 NTSTATUS
@@ -368,7 +370,7 @@ XdpIrpCreateInterface(
     NTSTATUS Status;
     CONST XDP_INTERFACE_OPEN *Params = NULL;
     XDP_IFSET_HANDLE IfSetHandle = NULL;
-    VOID *InterfaceOffloadHandle = NULL;
+    XDP_IF_OFFLOAD_HANDLE InterfaceOffloadHandle = NULL;
     XDP_INTERFACE_OBJECT *InterfaceObject = NULL;
     CONST XDP_HOOK_ID HookId = {
         .Layer = XDP_HOOK_L2,
@@ -394,9 +396,7 @@ XdpIrpCreateInterface(
         goto Exit;
     }
 
-    Status =
-        XdpIfOpenInterfaceOffloadHandle(
-            IfSetHandle, &HookId, &InterfaceOffloadHandle);
+    Status = XdpIfOpenInterfaceOffloadHandle(IfSetHandle, &HookId, &InterfaceOffloadHandle);
     if (!NT_SUCCESS(Status)) {
         goto Exit;
     }
@@ -406,7 +406,7 @@ XdpIrpCreateInterface(
     if (InterfaceObject == NULL) {
         TraceError(
             TRACE_CORE,
-            "IfIndex=%u Failed to allocate RSS object", Params->IfIndex);
+            "IfIndex=%u Failed to allocate interface object", Params->IfIndex);
         Status = STATUS_NO_MEMORY;
         goto Exit;
     }
@@ -445,6 +445,15 @@ Exit:
     return Status;
 }
 
+VOID
+XdpOffloadRevertSettings(
+    _In_ XDP_IFSET_HANDLE IfSetHandle,
+    _In_ XDP_IF_OFFLOAD_HANDLE InterfaceOffloadHandle
+    )
+{
+    XdpOffloadQeoRevertSettings(IfSetHandle, InterfaceOffloadHandle);
+}
+
 static
 _IRQL_requires_max_(PASSIVE_LEVEL)
 _IRQL_requires_same_
@@ -456,9 +465,9 @@ XdpIrpInterfaceClose(
 {
     XDP_INTERFACE_OBJECT *InterfaceObject = IrpSp->FileObject->FsContext;
 
-    UNREFERENCED_PARAMETER(Irp);
-
     TraceEnter(TRACE_CORE, "Interface=%p", InterfaceObject);
+
+    UNREFERENCED_PARAMETER(Irp);
 
     ASSERT(InterfaceObject->IfSetHandle != NULL);
     ASSERT(InterfaceObject->InterfaceOffloadHandle != NULL);
@@ -503,6 +512,9 @@ XdpIrpInterfaceDeviceIoControl(
             XdpIrpInterfaceOffloadRssSet(
                 InterfaceObject, Irp->AssociatedIrp.SystemBuffer,
                 IrpSp->Parameters.DeviceIoControl.InputBufferLength);
+        break;
+    case IOCTL_INTERFACE_OFFLOAD_QEO_SET:
+        Status = XdpIrpInterfaceOffloadQeoSet(InterfaceObject, Irp, IrpSp);
         break;
     default:
         Status = STATUS_NOT_SUPPORTED;
