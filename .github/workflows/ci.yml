@@ -11,6 +11,8 @@ on:
     - main
     - release/*
     - prerelease/*
+  schedule:
+    - cron: '37 12 * * 2'
 
 concurrency:
   # Cancel any workflow currently in progress for the same PR.
@@ -33,11 +35,20 @@ jobs:
         configuration: [Release, Debug]
         platform: [x64]
     runs-on: windows-${{ matrix.os }}
+    permissions:
+      actions: read
+      contents: read
+      security-events: write  # For CodeQL
     steps:
     - name: Checkout repository
-      uses: actions/checkout@c85c95e3d7251135ab7dc9ce3241c5835cc595a9
+      uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
       with:
         submodules: recursive
+    - name: Initialize CodeQL
+      if: ${{ github.event_name == 'schedule' }}
+      uses: github/codeql-action/init@v2
+      with:
+        languages: c-cpp
     - name: Setup MSBuild.exe
       uses: microsoft/setup-msbuild@ab534842b4bdf384b8aaf93765dc6f721d9f5fab
     - name: Prepare Machine
@@ -61,7 +72,7 @@ jobs:
       run: tools/create-installer.ps1 -Config ${{ matrix.configuration }} -Platform ${{ matrix.platform }}
     - name: Upload Artifacts
       if: matrix.os == 2022
-      uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce
+      uses: actions/upload-artifact@a8a3f3ad30e3422c9c7b888a15615d19a852ae32
       with:
         name: bin_${{ matrix.configuration }}_${{ matrix.platform }}
         path: |
@@ -76,6 +87,11 @@ jobs:
         accountName: mscodehub
         symbolServiceUrl: 'https://artifacts.dev.azure.com'
         personalAccessToken: ${{ secrets.AZDO_PAT }}
+    - name: Perform CodeQL Analysis
+      if: ${{ github.event_name == 'schedule' }}
+      uses: github/codeql-action/analyze@v2
+      with:
+        category: "/language:c-cpp"
 
   functional_tests:
     name: Functional Tests
@@ -99,7 +115,7 @@ jobs:
      - "1ES.ImageOverride=WS${{ matrix.windows }}-Functional"
     steps:
     - name: Checkout repository
-      uses: actions/checkout@c85c95e3d7251135ab7dc9ce3241c5835cc595a9
+      uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
       with:
         sparse-checkout: tools
     - name: Check Drivers
@@ -129,7 +145,7 @@ jobs:
       shell: PowerShell
       run: tools/log.ps1 -Convert -Name xdpfunc* -Verbose -Config ${{ matrix.configuration }} -Arch ${{ matrix.platform }}
     - name: Upload Logs
-      uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce
+      uses: actions/upload-artifact@a8a3f3ad30e3422c9c7b888a15615d19a852ae32
       if: ${{ always() }}
       with:
         name: logs_func_win${{ matrix.windows }}_${{ matrix.configuration }}_${{ matrix.platform }}
@@ -162,7 +178,7 @@ jobs:
      - "1ES.ImageOverride=WS${{ matrix.windows }}-Spinxsk"
     steps:
     - name: Checkout repository
-      uses: actions/checkout@c85c95e3d7251135ab7dc9ce3241c5835cc595a9
+      uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
       with:
         sparse-checkout: tools
     - name: Check Drivers
@@ -192,7 +208,7 @@ jobs:
       shell: PowerShell
       run: tools/log.ps1 -Convert -Name spinxsk -Verbose -Config ${{ matrix.configuration }} -Arch ${{ matrix.platform }}
     - name: Upload Logs
-      uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce
+      uses: actions/upload-artifact@a8a3f3ad30e3422c9c7b888a15615d19a852ae32
       if: ${{ always() }}
       with:
         name: logs_stress_win${{ matrix.windows }}_${{ matrix.configuration }}_${{ matrix.platform }}
@@ -217,7 +233,7 @@ jobs:
      - "1ES.ImageOverride=WS${{ matrix.windows }}"
     steps:
     - name: Checkout repository
-      uses: actions/checkout@c85c95e3d7251135ab7dc9ce3241c5835cc595a9
+      uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
       with:
         sparse-checkout: tools
     - name: Download Artifacts
@@ -229,7 +245,7 @@ jobs:
       shell: PowerShell
       run: tools/pktfuzz.ps1 -Minutes 10 -Workers 8 -Config ${{ matrix.configuration }} -Arch ${{ matrix.platform }} -Verbose
     - name: Upload Logs
-      uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce
+      uses: actions/upload-artifact@a8a3f3ad30e3422c9c7b888a15615d19a852ae32
       if: ${{ always() }}
       with:
         name: logs_pktfuzz_win${{ matrix.windows }}_${{ matrix.configuration }}_${{ matrix.platform }}
@@ -251,7 +267,7 @@ jobs:
      - "1ES.ImageOverride=WS${{ matrix.windows }}"
     steps:
     - name: Checkout repository
-      uses: actions/checkout@c85c95e3d7251135ab7dc9ce3241c5835cc595a9
+      uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
       with:
         sparse-checkout: tools
     - name: Check Drivers
@@ -280,10 +296,69 @@ jobs:
         SAS_TOKEN: ${{ secrets.PERF_DATA_SAS }}
       run: tools/upload-perfdata.ps1 -Verbose -FileName "artifacts/logs/xskperfsuite.csv" -ContainerName "cidata" -BlobName "xskperf-ws${{ matrix.windows }}.csv"
     - name: Upload Logs
-      uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce
+      uses: actions/upload-artifact@a8a3f3ad30e3422c9c7b888a15615d19a852ae32
       if: ${{ always() }}
       with:
         name: logs_perf_win${{ matrix.windows }}_${{ matrix.configuration }}_${{ matrix.platform }}
+        path: artifacts/logs
+    - name: Check Drivers
+      if: ${{ always() }}
+      shell: PowerShell
+      run: tools/check-drivers.ps1 -Config ${{ matrix.configuration }} -Arch ${{ matrix.platform }} -Verbose
+
+  downlevel_functional_tests:
+    name: Downlevel Functional Tests
+    needs: build
+    env:
+      Runtime: 15 # minutes. Update timeout-minutes with any changes.
+      Iters: 1
+    strategy:
+      fail-fast: false
+      matrix:
+        downlevel_release: [1.0.0]
+        windows: [2019, 2022, Prerelease]
+        configuration: [Release]
+        platform: [x64]
+    runs-on:
+     - self-hosted
+     - "1ES.Pool=xdp-ci-functional-gh"
+     - "1ES.ImageOverride=WS${{ matrix.windows }}-Functional"
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      with:
+        sparse-checkout: tools
+    - name: Check Drivers
+      shell: PowerShell
+      run: tools/check-drivers.ps1 -Config ${{ matrix.configuration }} -Arch ${{ matrix.platform }} -Verbose
+    - name: Prepare Machine
+      shell: PowerShell
+      run: tools/prepare-machine.ps1 -ForFunctionalTest -NoReboot -Verbose
+    - name: Download Artifacts
+      uses: actions/download-artifact@9bc31d5ccc31df68ecc42ccf4149144866c47d8a
+      with:
+        name: bin_${{ matrix.configuration }}_${{ matrix.platform }}
+        path: artifacts/bin
+    - name: Download Downlevel Tests
+      shell: PowerShell
+      run: |
+        Invoke-WebRequest -Uri "https://github.com/microsoft/xdp-for-windows/releases/download/v${{ matrix.downlevel_release }}/xdp-tests-${{ matrix.platform }}-${{ matrix.downlevel_release }}.zip" -OutFile "artifacts/downlevel-test.zip"
+        Expand-Archive -Path artifacts/downlevel-test.zip -DestinationPath artifacts/downlevel-test/${{ matrix.platform }}
+        Copy-Item -Path artifacts/downlevel-test/${{ matrix.platform }}/bin/* -Destination artifacts/bin/${{ matrix.platform }}_${{ matrix.configuration }}
+    - name: Run Tests
+      shell: PowerShell
+      timeout-minutes: 15
+      run: tools/functional.ps1 -Verbose -Config ${{ matrix.configuration }} -Arch ${{ matrix.platform }} -Iterations ${{ env.Iters }} -Timeout ${{ env.Runtime }}
+    - name: Convert Logs
+      if: ${{ always() }}
+      timeout-minutes: 5
+      shell: PowerShell
+      run: tools/log.ps1 -Convert -Name xdpfunc* -Verbose -Config ${{ matrix.configuration }} -Arch ${{ matrix.platform }}
+    - name: Upload Logs
+      uses: actions/upload-artifact@a8a3f3ad30e3422c9c7b888a15615d19a852ae32
+      if: ${{ always() }}
+      with:
+        name: logs_func_win${{ matrix.windows }}_${{ matrix.configuration }}_${{ matrix.platform }}
         path: artifacts/logs
     - name: Check Drivers
       if: ${{ always() }}
@@ -301,7 +376,7 @@ jobs:
     runs-on: windows-2022
     steps:
     - name: Checkout repository
-      uses: actions/checkout@c85c95e3d7251135ab7dc9ce3241c5835cc595a9
+      uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
     - name: Download Artifacts
       uses: actions/download-artifact@9bc31d5ccc31df68ecc42ccf4149144866c47d8a
       with:
@@ -314,7 +389,7 @@ jobs:
       shell: PowerShell
       run: tools/create-test-archive.ps1 -Config ${{ matrix.configuration }} -Platform ${{ matrix.platform }}
     - name: Upload Release Artifacts
-      uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce
+      uses: actions/upload-artifact@a8a3f3ad30e3422c9c7b888a15615d19a852ae32
       with:
         name: release_artifacts_${{ matrix.configuration }}_${{ matrix.platform }}
         path: |
@@ -331,7 +406,12 @@ jobs:
         configuration: [Release, Debug]
     steps:
     - name: Checkout repository
-      uses: actions/checkout@c85c95e3d7251135ab7dc9ce3241c5835cc595a9
+      uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+    - name: Initialize CodeQL
+      if: ${{ github.event_name == 'schedule' }}
+      uses: github/codeql-action/init@v2
+      with:
+        languages: csharp
     - name: Setup .NET
       uses: actions/setup-dotnet@3447fd6a9f9e57506b15f895c5b76d3b197dc7c2
       with:
@@ -341,14 +421,34 @@ jobs:
       run: tools/prepare-machine.ps1 -ForBuild -Verbose
     - name: Build
       run: dotnet build src\xdpetwplugin\xdpetwplugin.sln -c ${{ matrix.configuration }}
-    - uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce
+    - uses: actions/upload-artifact@a8a3f3ad30e3422c9c7b888a15615d19a852ae32
       with:
         name: etw_${{ matrix.configuration }}
         path: artifacts/bin
+    - name: Perform CodeQL Analysis
+      if: ${{ github.event_name == 'schedule' }}
+      uses: github/codeql-action/analyze@v2
+      with:
+        category: "/language:csharp"
+
+  netperf:
+    name: Run Perf
+    needs: []
+    runs-on: windows-latest
+    steps:
+    - name: Run NetPerf Workflow
+      shell: pwsh
+      run: |
+        $url = "https://raw.githubusercontent.com/microsoft/netperf/main/run-workflow.ps1"
+        if ('${{ secrets.NET_PERF_TRIGGER }}' -eq '') {
+            Write-Host "Not able to run because no secrets are available!"
+            return
+        }
+        iex "& { $(irm $url) } ${{ secrets.NET_PERF_TRIGGER }} xdp ${{ github.sha }} ${{ github.ref }} ${{ github.event.pull_request.number }}"
 
   Complete:
     name: Complete
-    needs: [build, functional_tests, stress_tests, pktfuzz_tests, perf_tests, create_artifacts, etw]
+    needs: [build, functional_tests, stress_tests, pktfuzz_tests, perf_tests, downlevel_functional_tests, create_artifacts, etw, netperf]
     runs-on: windows-latest
     steps:
     - run: echo "CI succeeded"
